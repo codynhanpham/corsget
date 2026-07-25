@@ -241,7 +241,11 @@ pub async fn proxy_handler(
     let mut redirect_base = target_url.clone();
     let upstream_response = loop {
         let resp = upstream_req.send().await.map_err(AppError::from)?;
-        if !resp.status().is_redirection() {
+        // `StatusCode::is_redirection()` also includes statuses such as
+        // `304 Not Modified`, which are not redirect instructions and do not
+        // have to contain a Location header. Only follow statuses that
+        // explicitly define redirect semantics here.
+        if !is_followable_redirect(resp.status()) {
             break resp;
         }
         if max_redirects == 0 || redirects_left == 0 {
@@ -327,6 +331,24 @@ fn axum_limit_snapshot_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Return whether an upstream status should be followed as a redirect.
+///
+/// `StatusCode::is_redirection()` is broader than the set of HTTP statuses
+/// that carry a redirect destination: for example, a normal `304 Not
+/// Modified` response is classified as a redirection but has no `Location`
+/// header. Treating every 3xx response as a redirect causes such responses to
+/// fail with "redirect without Location header".
+fn is_followable_redirect(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
 }
 
 #[cfg(test)]
@@ -427,5 +449,16 @@ mod tests {
         let out = copy_response_headers(&source, false);
 
         assert_eq!(out.get(header::CONTENT_LENGTH).unwrap(), "10");
+    }
+
+    #[test]
+    fn only_location_redirect_statuses_are_followed() {
+        assert!(is_followable_redirect(StatusCode::MOVED_PERMANENTLY));
+        assert!(is_followable_redirect(StatusCode::FOUND));
+        assert!(is_followable_redirect(StatusCode::SEE_OTHER));
+        assert!(is_followable_redirect(StatusCode::TEMPORARY_REDIRECT));
+        assert!(is_followable_redirect(StatusCode::PERMANENT_REDIRECT));
+        assert!(!is_followable_redirect(StatusCode::NOT_MODIFIED));
+        assert!(!is_followable_redirect(StatusCode::MULTIPLE_CHOICES));
     }
 }
