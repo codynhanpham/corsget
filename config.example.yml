@@ -1,0 +1,69 @@
+application:
+  # Bind to one or more local addresses. A single string is also accepted.
+  host:
+    - 127.0.0.1
+    # - 0.0.0.0
+    # - "::"
+  port: 9647
+  # The hostname to use for generating URLs and headers.
+  # This should be the public hostname of the server, not the local address.
+  hostname: localhost
+
+  # Which header to use for determining the real IP address of the client.
+  # Useful if this application is behind a reverse proxy.
+  real_ip_header: "X-Real-IP"
+
+connection:
+  target:
+    ## Targets origin to allow or deny requests from ##
+    # Either as a blacklist or whitelist. If both are defined, the whitelist will take precedence.
+    # If both are empty, all targets will be allowed.
+    # Format: exact, wildcard, or regex matches
+    blacklist:
+      - #
+    whitelist:
+      - #
+
+  origin:
+    ## Origins of the requesting site to allow or deny requests from ##
+    # Either as a blacklist or whitelist. If both are defined, the whitelist will take precedence.
+    # If both are empty, all origins will be allowed.
+    # Format: exact, wildcard, or regex matches
+    blacklist:
+      - #
+    whitelist:
+      # Default only allow local requests to the proxy server to avoid abuse. Add your own domains or IPs to the whitelist to allow them to use the proxy.
+      - localhost
+      - 127.0.0.1
+      - 10.*
+      - 192.168.*
+      - 100.*
+      - #
+
+  rate_limit:
+    ## Rate limit configuration ##
+    # The rate limit is applied per requester origin per client IP address.
+    # All limit tiers applies
+    - window: 1 # seconds
+      max: 5 # requests
+    - window: 60
+      max: 500 # requests
+
+  bandwidth_limit:
+    ## Bandwidth limit configuration ##
+    connection:
+      # Maximum number of bytes per window per requester origin per client IP address.
+      # All limit tiers applies
+      - window: 60 # seconds
+        max: 1024 * 1024 * 4096 # bytes == 4GB
+
+    result:
+      # Maximum number of bytes per response body
+      max: 1024 * 1024 * 512 # bytes == 512MB
+
+proxy:
+  # Maximum number of redirects to follow when proxying a request. Set to 0 to disable following redirects.
+  max_redirects: 10
+
+  # Maximum number of seconds to wait for a response from the target server before timing out.
+  timeout: 30

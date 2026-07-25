@@ -1,0 +1,38 @@
+[package]
+name = "corsget"
+description = "A simple CORS proxy for GET requests"
+authors = ["Cody Nhan Pham <contact@codynhanpham.com>"]
+homepage = "https://github.com/codynhanpham/corsget"
+repository = "https://github.com/codynhanpham/corsget"
+license = "MIT"
+keywords = ["cors", "proxy", "get", "http", "rust"]
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.9"
+axum-limit = "0.1.0"
+async-stream = "0.3"
+bytes = "1"
+dashmap = "6"
+futures = "0.3"
+http = "1"
+local-ip-address = "0.6.13"
+noyalib = "0.0.16"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
