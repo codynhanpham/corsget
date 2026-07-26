@@ -32,8 +32,6 @@ call :build_cross aarch64-unknown-linux-musl
 if errorlevel 1 goto :failed
 call :build_cross riscv64gc-unknown-linux-gnu
 if errorlevel 1 goto :failed
-call :build_cross riscv64gc-unknown-linux-musl
-if errorlevel 1 goto :failed
 
 call :build_cargo x86_64-pc-windows-msvc
 if errorlevel 1 goto :failed

@@ -10,23 +10,22 @@ permissions:
 
 jobs:
     detect-version:
-        name: Detect Cargo version bump
+        name: Check release version
         runs-on: ubuntu-latest
         outputs:
-            changed: ${{ steps.version.outputs.changed }}
+            changed: ${{ steps.version.outputs.should_run }}
             version: ${{ steps.version.outputs.version }}
         steps:
-            - name: Check out repository history
+            - name: Check out repository
               uses: actions/checkout@v4
               with:
-                  fetch-depth: 0
+                  fetch-depth: 1
 
-            - name: Detect package version change
+            - name: Check Cargo version against release tag
               id: version
               shell: bash
               env:
-                  PUSH_BEFORE: ${{ github.event.before }}
-                  PUSH_SHA: ${{ github.sha }}
+                  GH_TOKEN: ${{ github.token }}
               run: |
                   set -euo pipefail
 
@@ -48,21 +47,22 @@ jobs:
                     exit 1
                   fi
 
-                  changed=false
-                  if [[ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
-                    previous_version="$(git show "$PUSH_BEFORE":Cargo.toml 2>/dev/null | package_version /dev/stdin || true)"
-                    if [[ -n "$previous_version" && "$previous_version" != "$current_version" ]]; then
-                      changed=true
-                    fi
+                  release_tag="v${current_version}"
+                  if gh release view "$release_tag" >/dev/null 2>&1; then
+                    should_run=false
+                    echo "Release $release_tag already exists; skipping build and release jobs."
+                  else
+                    should_run=true
+                    echo "Release $release_tag does not exist; build and release jobs will run."
                   fi
 
-                  echo "changed=$changed" >> "$GITHUB_OUTPUT"
+                  echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
                   echo "version=$current_version" >> "$GITHUB_OUTPUT"
                   echo "Version: $current_version"
-                  echo "Version changed: $changed"
+                  echo "Should run: $should_run"
 
             - name: Validate lockfile and metadata
-              if: steps.version.outputs.changed == 'true'
+              if: steps.version.outputs.should_run == 'true'
               shell: bash
               run: |
                   set -euo pipefail
@@ -96,9 +96,6 @@ jobs:
                       runner: ubuntu-latest
                       archive: tar.gz
                     - target: riscv64gc-unknown-linux-gnu
-                      runner: ubuntu-latest
-                      archive: tar.gz
-                    - target: riscv64gc-unknown-linux-musl
                       runner: ubuntu-latest
                       archive: tar.gz
                     - target: x86_64-pc-windows-msvc
@@ -170,20 +167,7 @@ jobs:
                   path: dist
                   merge-multiple: true
 
-            - name: Skip if release tag already exists
-              id: existing
-              env:
-                  GH_TOKEN: ${{ github.token }}
-              run: |
-                  if gh release view "v${VERSION}" >/dev/null 2>&1; then
-                    echo "exists=true" >> "$GITHUB_OUTPUT"
-                    echo "Release v${VERSION} already exists; skipping."
-                  else
-                    echo "exists=false" >> "$GITHUB_OUTPUT"
-                  fi
-
             - name: Create draft release
-              if: steps.existing.outputs.exists != 'true'
               env:
                   GH_TOKEN: ${{ github.token }}
               run: |
