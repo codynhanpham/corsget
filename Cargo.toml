@@ -6,7 +6,7 @@ homepage = "https://github.com/codynhanpham/corsget"
 repository = "https://github.com/codynhanpham/corsget"
 license = "MIT"
 keywords = ["cors", "proxy", "get", "http", "rust"]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]

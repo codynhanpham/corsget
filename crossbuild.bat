@@ -18,7 +18,7 @@ if not defined HOST_TARGET (
     exit /b 1
 )
 set "HOST_TARGET_LISTED="
-for %%T in (x86_64-unknown-freebsd armv7-unknown-linux-gnueabihf armv7-unknown-linux-musleabihf aarch64-unknown-linux-gnu aarch64-unknown-linux-musl riscv64gc-unknown-linux-gnu x86_64-pc-windows-msvc x86_64-apple-darwin aarch64-apple-darwin) do (
+for %%T in (x86_64-unknown-freebsd armv7-unknown-linux-gnueabihf armv7-unknown-linux-musleabihf aarch64-unknown-linux-gnu aarch64-unknown-linux-musl riscv64gc-unknown-linux-gnu x86_64-unknown-linux-gnu x86_64-unknown-linux-musl x86_64-pc-windows-msvc x86_64-apple-darwin aarch64-apple-darwin) do (
     if /i "%%T"=="%HOST_TARGET%" set "HOST_TARGET_LISTED=1"
 )
 
@@ -41,6 +41,10 @@ if errorlevel 1 goto :failed
 call :build_cross aarch64-unknown-linux-musl
 if errorlevel 1 goto :failed
 call :build_cross riscv64gc-unknown-linux-gnu
+if errorlevel 1 goto :failed
+call :build_cross x86_64-unknown-linux-gnu
+if errorlevel 1 goto :failed
+call :build_cross x86_64-unknown-linux-musl
 if errorlevel 1 goto :failed
 
 call :build_native x86_64-pc-windows-msvc
