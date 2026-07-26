@@ -1,0 +1,194 @@
+name: Build and draft release
+
+on:
+    push:
+        branches:
+            - main
+
+permissions:
+    contents: write
+
+jobs:
+    detect-version:
+        name: Detect Cargo version bump
+        runs-on: ubuntu-latest
+        outputs:
+            changed: ${{ steps.version.outputs.changed }}
+            version: ${{ steps.version.outputs.version }}
+        steps:
+            - name: Check out repository history
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Detect package version change
+              id: version
+              shell: bash
+              env:
+                  PUSH_BEFORE: ${{ github.event.before }}
+                  PUSH_SHA: ${{ github.sha }}
+              run: |
+                  set -euo pipefail
+
+                  package_version() {
+                    awk '
+                      /^\[package\][[:space:]]*$/ { in_package = 1; next }
+                      /^\[/ { in_package = 0 }
+                      in_package && /^version[[:space:]]*=/ {
+                        gsub(/^[^\"]*\"|\".*$/, "")
+                        print
+                        exit
+                      }
+                    ' "$1"
+                  }
+
+                  current_version="$(package_version Cargo.toml)"
+                  if [[ -z "$current_version" ]]; then
+                    echo "Could not read the package version from Cargo.toml" >&2
+                    exit 1
+                  fi
+
+                  changed=false
+                  if [[ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+                    previous_version="$(git show "$PUSH_BEFORE":Cargo.toml 2>/dev/null | package_version /dev/stdin || true)"
+                    if [[ -n "$previous_version" && "$previous_version" != "$current_version" ]]; then
+                      changed=true
+                    fi
+                  fi
+
+                  echo "changed=$changed" >> "$GITHUB_OUTPUT"
+                  echo "version=$current_version" >> "$GITHUB_OUTPUT"
+                  echo "Version: $current_version"
+                  echo "Version changed: $changed"
+
+            - name: Validate lockfile and metadata
+              if: steps.version.outputs.changed == 'true'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  metadata_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+                  if [[ "$metadata_version" != "${{ steps.version.outputs.version }}" ]]; then
+                    echo "Cargo.lock/package metadata version mismatch: $metadata_version" >&2
+                    exit 1
+                  fi
+
+    build:
+        name: Build ${{ matrix.target }}
+        needs: detect-version
+        if: needs.detect-version.outputs.changed == 'true'
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - target: x86_64-unknown-freebsd
+                      runner: ubuntu-latest
+                      archive: tar.gz
+                    - target: armv7-unknown-linux-gnueabihf
+                      runner: ubuntu-latest
+                      archive: tar.gz
+                    - target: armv7-unknown-linux-musleabihf
+                      runner: ubuntu-latest
+                      archive: tar.gz
+                    - target: aarch64-unknown-linux-gnu
+                      runner: ubuntu-latest
+                      archive: tar.gz
+                    - target: aarch64-unknown-linux-musl
+                      runner: ubuntu-latest
+                      archive: tar.gz
+                    - target: riscv64gc-unknown-linux-gnu
+                      runner: ubuntu-latest
+                      archive: tar.gz
+                    - target: riscv64gc-unknown-linux-musl
+                      runner: ubuntu-latest
+                      archive: tar.gz
+                    - target: x86_64-pc-windows-msvc
+                      runner: windows-latest
+                      archive: zip
+                    - target: x86_64-apple-darwin
+                      runner: macos-latest
+                      archive: tar.gz
+        runs-on: ${{ matrix.runner }}
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v4
+
+            - name: Build binary
+              uses: houseabsolute/actions-rust-cross@v1
+              with:
+                  command: build
+                  target: ${{ matrix.target }}
+                  args: --locked --release --target-dir target/cross
+                  strip: false
+
+            - name: Package Unix binary
+              if: matrix.archive == 'tar.gz'
+              shell: bash
+              env:
+                  TARGET: ${{ matrix.target }}
+                  VERSION: ${{ needs.detect-version.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  archive="corsget-v${VERSION}-${TARGET}.tar.gz"
+                  binary="target/cross/${TARGET}/release/corsget"
+                  test -f "$binary"
+                  tar -czf "$archive" -C "$(dirname "$binary")" corsget
+
+            - name: Package Windows binary
+              if: matrix.archive == 'zip'
+              shell: pwsh
+              env:
+                  TARGET: ${{ matrix.target }}
+                  VERSION: ${{ needs.detect-version.outputs.version }}
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $archive = "corsget-v$env:VERSION-$env:TARGET.zip"
+                  $binary = "target/cross/$env:TARGET/release/corsget.exe"
+                  if (-not (Test-Path $binary)) { throw "Binary not found: $binary" }
+                  Compress-Archive -Path $binary -DestinationPath $archive
+
+            - name: Upload packaged binary
+              uses: actions/upload-artifact@v4
+              with:
+                  name: corsget-${{ matrix.target }}
+                  path: corsget-v${{ needs.detect-version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+                  if-no-files-found: error
+                  retention-days: 7
+
+    draft-release:
+        name: Create draft GitHub release
+        needs:
+            - detect-version
+            - build
+        if: needs.detect-version.outputs.changed == 'true'
+        runs-on: ubuntu-latest
+        env:
+            VERSION: ${{ needs.detect-version.outputs.version }}
+        steps:
+            - name: Download packaged binaries
+              uses: actions/download-artifact@v4
+              with:
+                  path: dist
+                  merge-multiple: true
+
+            - name: Skip if release tag already exists
+              id: existing
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  if gh release view "v${VERSION}" >/dev/null 2>&1; then
+                    echo "exists=true" >> "$GITHUB_OUTPUT"
+                    echo "Release v${VERSION} already exists; skipping."
+                  else
+                    echo "exists=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Create draft release
+              if: steps.existing.outputs.exists != 'true'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "v${VERSION}" dist/* \
+                    --target "$GITHUB_SHA" \
+                    --draft \
+                    --title "corsget v${VERSION}" \
+                    --generate-notes

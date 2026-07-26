@@ -1,0 +1,44 @@
+services:
+  corsget:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: corsget:local
+    restart: unless-stopped
+    environment:
+      # Override this in .env or with `docker compose run -e CORSGET_CONFIG=...`.
+      CORSGET_CONFIG: ${CORSGET_CONFIG:-/etc/corsget/config.yml}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      # Set CORSGET_CONFIG_FILE when the host config is not ./config.yml.
+      - ${CORSGET_CONFIG_FILE:-./config.yml}:/etc/corsget/config.yml:ro
+    # The image runs as UID 10001 and does not contain a shell or package manager.
+    ports:
+      # Host as `port : container` port. 
+      # The container port must match application.port in the mounted config.yml.
+      - "${CORSGET_HOST_PORT:-9647}:9647"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+
+
+# To set the config file path, run:
+# Unix:
+#   export CORSGET_CONFIG_FILE=/path/to/config.yml
+# PowerShell:
+#   $env:CORSGET_CONFIG_FILE = "C:\path\to\config.yml"
+
+# To start the service in the background, run:
+#   docker compose up -d
+
+# All together:
+#   export CORSGET_CONFIG_FILE=/path/to/config.yml
+#   docker compose up -d
+
+# To stop the service, run:
+#   docker compose down
+
+# To view logs, run:
+#   docker compose logs -f corsget

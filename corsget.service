@@ -1,0 +1,63 @@
+[Unit]
+# Copy this file to /etc/systemd/system/corsget.service, then run:
+#   systemctl daemon-reload
+#   systemctl enable --now corsget
+
+Description=CORS GET proxy server
+Documentation=https://github.com/codynhanpham/corsget
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Run under a dedicated service account (recommended).
+# Create the dedicated account with:
+#   useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin corsget
+# The selected account must be able to execute the binary and read the config.
+# Do not use root unless it is specifically required.
+User=corsget
+Group=corsget
+
+# Alternatively, replace both values with an existing unprivileged user and its group, for example:
+; User=alice
+; Group=alice
+
+
+# Set the process working directory.
+# The directory must exist and be accessible by the selected user.
+WorkingDirectory=/etc/corsget
+
+# Set the default config explicitly because corsget's implicit default is
+# config.yaml beside the executable, not in WorkingDirectory.
+# Clone the template from GitHub and update for your needs:
+# https://github.com/codynhanpham/corsget/blob/main/config.example.yml
+Environment=CORSGET_CONFIG=/etc/corsget/config.yml
+Environment=RUST_LOG=info
+
+# Optional overrides. Create /etc/default/corsget with, for example:
+; CORSGET_CONFIG=/etc/corsget/config.yml
+; RUST_LOG=debug
+# Values loaded from this file override the Environment= defaults above.
+EnvironmentFile=-/etc/default/corsget
+
+
+# Update this path if the compiled binary is installed elsewhere.
+# Example: /opt/corsget/corsget
+ExecStart=/usr/local/bin/corsget
+
+Restart=on-failure
+RestartSec=5s
+
+# Restrict the service. These settings do not affect config selection.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# If the binary or config is stored outside the paths above, review these
+# restrictions and add only the required directories with ReadOnlyPaths= or
+# ReadWritePaths= instead of disabling the sandbox.
+; ReadWritePaths=/etc/corsget
+
+[Install]
+WantedBy=multi-user.target

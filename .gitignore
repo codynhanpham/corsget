@@ -33,3 +33,5 @@ vite.config.ts.timestamp-*
 
 # Rust
 target
+target/cross
+cross

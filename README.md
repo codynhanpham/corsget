@@ -5,15 +5,29 @@
 A backend proxy server that fetches any URL on your behalf, bypassing
 client-side CORS restrictions. Point your browser requests at
 `<proxy-host>/<target-url>` and the server fetches the target and returns
-the exact response — status, headers, and body — with permissive CORS
+the exact response - status, headers, and body - with permissive CORS
 headers attached.
+
+## Why?
+
+There are many CORS proxies out there, but most are either paid, rate-limited, or lack CORS controls of their own. [cors-anywhere](https://github.com/Rob--W/cors-anywhere) is *almost* what I need, but still has some limitations for what I want a proxy to do.
+
+Here are the problems I want to solve with this project:
+- You own everything. I want to proxy Authenticated requests that might contain sensitive data, owning your own server is the only answer to that.
+- CORS policy for consumers of this proxy. You can control which **origins** are allowed to use your proxy, and which **target** hosts are allowed to be proxied.
+- Rate limiting. Both request rate limits and bandwidth limits can be configured.
+- Lightweight and fast. All in a single file. A running instance consumes < 5MB of RAM and little CPU overhead. It is written in Rust and uses async I/O for high concurrency.
+
 
 ## AI Usage Disclaimer
 
-The project was first bootstrapped with a mix of AI models given a specification sheet written by me. Immediately, the code was reviewed manually, refactored for readability, and tested. After the initial bootstrap, AI is mostly only used for documentation and unit tests.
+The project was first bootstrapped with a mix of AI models given a specification sheet written by me. Immediately, the code was reviewed manually, refactored for readability, and tested. After the initial bootstrap, AI is mostly only used for documentation, CI pipelines, and unit tests.
 
 ## Quick start
 
+### Manually
+
+Download the latest release from [GitHub Releases](https://github.com/codynhanpham/corsget/releases) and run it. The first launch creates a `config.yaml` beside the executable. Edit it as needed and restart. Then proxy requests through the server.
 ```sh
 # 1. Run. On the first launch without a config argument, an annotated
 #    config.yaml is created beside the executable from the embedded template.
@@ -25,10 +39,56 @@ The project was first bootstrapped with a mix of AI models given a specification
 curl -i "http://localhost:9647/https://httpbin.org/get"
 ```
 
+You can also download the source code and build it yourself with `cargo build --release`.
+
 The server listens on `host:port` from `config.yaml` (default
-`0.0.0.0:9647`). The default file is created beside the executable, not in
+`127.0.0.1:9647`). The default file is created beside the executable, not in
 the current working directory. The template is also available at
 [`config.example.yml`](config.example.yml).
+
+### Docker
+
+A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](docker-compose.yml) are provided for convenience. To use them, you first must clone the project to build the image locally. A prebuilt image might be published on Docker Hub in the future.
+
+1. Clone the repo and build the image:
+	```sh
+	git clone https://github.com/codynhanpham/corsget.git
+	cd corsget
+	```
+2. Copy and update the config file:
+	```sh
+	cp config.example.yml config.yaml
+	# Edit config.yaml as needed.
+	```
+3. Update the `docker-compose.yml` as needed to change the host port or mount a custom config file. Config file can also be specified via the `CORSGET_CONFIG_FILE` host environment variable to pass into the container.
+4. Start the container:
+	```sh
+	# Optionally, specify a custom config file path:
+	export CORSGET_CONFIG_FILE=/path/to/config.yaml
+
+	# Build locally & Start the container
+	docker compose up -d
+	```
+	More docker-compose documentations is also noted at the end of the [`docker-compose.yml`](docker-compose.yml) file.
+
+### Systemd Service
+
+You can also build the project (or download a release) and run it as a `systemd` service. A sample unit file is provided in [`corsget.service`](corsget.service).
+
+Please see more details in the example unit file. Main points to note are:
+1. Copy the unit file to `/etc/systemd/system/corsget.service` and edit it as needed.
+2. Select a user to run the service as: either a dedicated user, or as your own user. If you choose a dedicated user, make sure to create it first and give it permission to read the config file.
+3. Point the `WorkingDirectory=` to the directory where the config file is located. The default is `/etc/corsget`.
+4. Update the `Environment=CORSGET_CONFIG=` line to point to your config file. The default is `/etc/corsget/config.yaml`.
+5. Update `ExecStart=` to point to the corsget binary. The default is `/usr/local/bin/corsget`.
+
+Then, enable and start the service:
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable corsget
+sudo systemctl start corsget
+```
+
 
 ## Routes
 
@@ -45,9 +105,9 @@ are preserved.
 
 | Request                                         | Proxied to                              |
 |-------------------------------------------------|-----------------------------------------|
-| `GET /github.com/search?q=rust`                 | `https://github.com/search?q=rust`       |
-| `GET /https://github.com/search?q=rust`         | `https://github.com/search?q=rust`       |
-| `GET //github.com/path`                         | `https://github.com/path`                |
+| `GET /example.com/search?q=CORS`                 | `https://example.com/search?q=CORS`       |
+| `GET /https://example.com/search?q=CORS`         | `https://example.com/search?q=CORS`       |
+| `GET //example.com/path`                         | `https://example.com/path`                |
 
 If no scheme is given, `https://` is prepended. Only `http` and `https`
 schemes are allowed; others return `400 Bad Request`.
@@ -65,9 +125,9 @@ example.
 
 | Field           | Type   | Default   | Description                                            |
 |-----------------|--------|-----------|--------------------------------------------------------|
-| `host`          | string | —         | Bind address (e.g. `0.0.0.0`).                         |
-| `port`          | u16    | —         | Bind port.                                             |
-| `hostname`      | string | —         | Public hostname (for logging / self-reference).       |
+| `host`          | string | -         | Bind address (e.g. `0.0.0.0`).                         |
+| `port`          | u16    | -         | Bind port.                                             |
+| `hostname`      | string | -         | Public hostname (for logging / self-reference).       |
 | `real_ip_header`| string | `X-Real-IP` | Header to read the real client IP from (reverse proxy). |
 
 `real_ip_header` must only be enabled when a trusted reverse proxy overwrites
@@ -102,9 +162,9 @@ simultaneously; the first to fail returns `429 Too Many Requests` with
 ```yaml
 rate_limit:
   - window: 1 # seconds
-    max: 5 # requests
+	max: 5 # requests
   - window: 60
-    max: 500
+	max: 500
 ```
 
 ### `connection.bandwidth_limit`
@@ -116,10 +176,10 @@ Per-(requesting-origin, client-IP) byte-bandwidth limits. Byte counts use
 ```yaml
 bandwidth_limit:
   connection: # per-(origin, ip) windowed byte cap
-    - window: 60 # seconds
-      max: 1024 * 1024 * 4096 # 4 GiB
+	- window: 60 # seconds
+	  max: 1024 * 1024 * 4096 # 4 GiB
   result: # hard cap on a single response body
-    max: 1024 * 1024 * 512 # 512 MiB
+	max: 1024 * 1024 * 512 # 512 MiB
 ```
 
 If a response's `Content-Length` exceeds `result.max`, it is rejected with
@@ -199,25 +259,25 @@ Error bodies are JSON: `{ "error": "<message>" }`.
 
 ```
 src/
-  main.rs        — load config, build router, serve + graceful shutdown
-  config.rs      — #[derive(Deserialize)] structs; load() via noyalib strict
-  matcher.rs     — MatchEntry { Exact | Wildcard | Regex } + TargetList
-  extractors.rs  — Origin, ClientIp, RateLimitKey (axum_limit::Key)
-  limit.rs       — BandwidthLimiter (fixed-window u64) + ResultSizeGuard
-  cors.rs        — CORS headers + OPTIONS preflight + hop-by-hop list
-  proxy.rs       — proxy handler: validate, eval lists, stream response
-  state.rs       — AppState (config + limiters + reqwest client)
-  error.rs       — AppError → IntoResponse
+  main.rs        - load config, build router, serve + graceful shutdown
+  config.rs      - #[derive(Deserialize)] structs; load() via noyalib strict
+  matcher.rs     - MatchEntry { Exact | Wildcard | Regex } + TargetList
+  extractors.rs  - Origin, ClientIp, RateLimitKey (axum_limit::Key)
+  limit.rs       - BandwidthLimiter (fixed-window u64) + ResultSizeGuard
+  cors.rs        - CORS headers + OPTIONS preflight + hop-by-hop list
+  proxy.rs       - proxy handler: validate, eval lists, stream response
+  state.rs       - AppState (config + limiters + reqwest client)
+  error.rs       - AppError → IntoResponse
 ```
 
 **Key crates:**
 
-- [`axum`](https://crates.io/crates/axum) 0.8 — HTTP server.
-- [`axum-limit`](https://crates.io/crates/axum-limit) 0.1 — request-count
+- [`axum`](https://crates.io/crates/axum) 0.8 - HTTP server.
+- [`axum-limit`](https://crates.io/crates/axum-limit) 0.1 - request-count
   rate limiting (extractor-based, tiered, per-key).
-- [`noyalib`](https://crates.io/crates/noyalib) 0.0 — YAML config parsing
+- [`noyalib`](https://crates.io/crates/noyalib) 0.0 - YAML config parsing
   (strict mode for typo detection).
-- [`reqwest`](https://crates.io/crates/reqwest) 0.12 — upstream HTTP client
+- [`reqwest`](https://crates.io/crates/reqwest) 0.12 - upstream HTTP client
   (raw passthrough, no transparent decompression).
 
 ## Guarantees

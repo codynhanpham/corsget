@@ -1,0 +1,28 @@
+# cross-rs configuration for corsget.
+#
+# The target matrix itself belongs in CI (or in repeated `cross build
+# --target ...` commands). This file configures how cross builds those targets.
+#
+# Release targets:
+#   x86_64-unknown-freebsd
+#   armv7-unknown-linux-gnueabihf
+#   armv7-unknown-linux-musleabihf
+#   aarch64-unknown-linux-gnu
+#   aarch64-unknown-linux-musl
+#   riscv64gc-unknown-linux-gnu
+#   riscv64gc-unknown-linux-musl
+#   x86_64-pc-windows-msvc
+#   x86_64-apple-darwin
+#
+# The Linux and FreeBSD targets use cross-rs container images. Windows MSVC
+# and macOS targets are normally built on native Windows and macOS runners;
+# cross-rs does not provide the default container images for those targets.
+
+[build]
+# Keep cross's standard target images and native toolchains. The project uses
+# reqwest with rustls-tls, so no system OpenSSL package is required.
+zig = false
+
+# Explicit target settings are intentionally omitted: all requested Linux and
+# FreeBSD targets are supported by cross-rs' standard images, and the Windows
+# and macOS builds should run natively in CI.
