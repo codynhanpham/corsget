@@ -42,7 +42,7 @@ curl -i "http://localhost:9647/https://httpbin.org/get"
 You can also download the source code and build it yourself with `cargo build --release`.
 
 The server listens on `host:port` from `config.yaml` (default
-`127.0.0.1:9647`). The default file is created beside the executable, not in
+`127.0.0.1:9647` and `[::1]:9647`). The default file is created beside the executable, not in
 the current working directory. The template is also available at
 [`config.example.yml`](config.example.yml).
 
@@ -232,8 +232,7 @@ Every response carries:
 
 - `Access-Control-Allow-Origin`: echoes the request `Origin` (or `*`).
 - `Access-Control-Allow-Credentials: true`
-- `Access-Control-Allow-Headers`: echoes `Access-Control-Request-Headers` from
-  the preflight request (or `Authorization` when none is supplied).
+- `Access-Control-Allow-Headers`: echoes `Access-Control-Request-Headers` from the preflight request (or `Authorization` when none is supplied).
 - `Access-Control-Allow-Methods: GET, OPTIONS`
 - `Access-Control-Max-Age: 86400`
 

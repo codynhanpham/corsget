@@ -119,22 +119,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for addr in addrs {
         listeners.push(tokio::net::TcpListener::bind(addr).await?);
     }
-    match list_afinet_netifas() {
-        Ok(interfaces) => {
-            let mut ips: Vec<IpAddr> = interfaces.into_iter().map(|(_, ip)| ip).collect();
-            ips.sort_by_key(|ip| matches!(ip, IpAddr::V6(_)));
-
-            let addresses = ips
-                .into_iter()
-                .map(|ip| SocketAddr::new(ip, port).to_string())
-                .collect::<Vec<_>>()
-                .join("\n  ");
-            tracing::info!(%hostname, "corsget listening on:\n  {addresses}");
-        }
-        Err(error) => {
-            tracing::info!(%hostname, port, %error, "corsget listening");
-        }
-    }
+    // For a specific bind address, report that address. For a wildcard bind,
+    // also report the machine's interface addresses as useful connection
+    // addresses. The wildcard socket itself remains the authoritative bind.
+    let addresses = listening_addresses(&listeners)?;
+    tracing::info!(%hostname, port, "corsget listening on:\n  {addresses}");
 
     let servers = listeners.into_iter().map(|listener| async {
         axum::serve(
@@ -149,6 +138,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+/// Return useful addresses for the startup message without confusing a
+/// wildcard bind with a single interface.
+fn listening_addresses(listeners: &[tokio::net::TcpListener]) -> Result<String, std::io::Error> {
+    let interfaces = list_afinet_netifas().ok().map(|entries| {
+        entries
+            .into_iter()
+            .map(|(_, ip)| ip)
+            .collect::<Vec<IpAddr>>()
+    });
+
+    let mut addresses = Vec::new();
+    for listener in listeners {
+        let bound = listener.local_addr()?;
+        if !bound.ip().is_unspecified() {
+            addresses.push(bound.to_string());
+            continue;
+        }
+
+        let matching_interfaces = interfaces.as_deref().unwrap_or(&[]).iter().filter(|ip| {
+            matches!(
+                (bound.ip(), ip),
+                (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+            )
+        });
+
+        let mut expanded = false;
+        for ip in matching_interfaces {
+            addresses.push(SocketAddr::new(*ip, bound.port()).to_string());
+            expanded = true;
+        }
+
+        // Keep the configured wildcard visible if interface enumeration is
+        // unavailable or returns no address for this address family.
+        if !expanded {
+            addresses.push(bound.to_string());
+        }
+    }
+
+    Ok(addresses.join("\n  "))
 }
 
 /// Root handler: always returns 404.

@@ -2,8 +2,9 @@ application:
   # Bind to one or more local addresses. A single string is also accepted.
   host:
     - 127.0.0.1
+    - "[::1]"
     # - 0.0.0.0
-    # - "::"
+    # - "[::]"
   port: 9647
   # The hostname to use for generating URLs and headers.
   # This should be the public hostname of the server, not the local address.
