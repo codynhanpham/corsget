@@ -92,11 +92,11 @@ sudo systemctl start corsget
 
 ## Routes
 
-| Method | Path         | Behaviour                                              |
-|--------|--------------|--------------------------------------------------------|
-| `GET`  | `/`          | `404 Not Found`                                        |
+| Method | Path         | Behaviour                                                          |
+|--------|--------------|--------------------------------------------------------------------|
+| `GET`  | `/`          | `404 Not Found`                                                    |
 | `GET`  | `/{target}`  | Proxy the target URL. See [Target URL format](#target-url-format). |
-| `OPTIONS` | `/{target}` | CORS preflight → `204 No Content` + CORS headers.     |
+| `OPTIONS` | `/{target}` | CORS preflight → `204 No Content` + CORS headers.                |
 
 ### Target URL format
 
@@ -105,9 +105,9 @@ are preserved.
 
 | Request                                         | Proxied to                              |
 |-------------------------------------------------|-----------------------------------------|
-| `GET /example.com/search?q=CORS`                 | `https://example.com/search?q=CORS`       |
-| `GET /https://example.com/search?q=CORS`         | `https://example.com/search?q=CORS`       |
-| `GET //example.com/path`                         | `https://example.com/path`                |
+| `GET /example.com/search?q=CORS`                | `https://example.com/search?q=CORS`     |
+| `GET /https://example.com/search?q=CORS`        | `https://example.com/search?q=CORS`     |
+| `GET //example.com/path`                        | `https://example.com/path`              |
 
 If no scheme is given, `https://` is prepended. Only `http` and `https`
 schemes are allowed; others return `400 Bad Request`.
@@ -123,11 +123,11 @@ example.
 
 ### `application`
 
-| Field           | Type   | Default   | Description                                            |
-|-----------------|--------|-----------|--------------------------------------------------------|
-| `host`          | string | -         | Bind address (e.g. `0.0.0.0`).                         |
-| `port`          | u16    | -         | Bind port.                                             |
-| `hostname`      | string | -         | Public hostname (for logging / self-reference).       |
+| Field           | Type   | Default   | Description                                               |
+|-----------------|--------|-----------|-----------------------------------------------------------|
+| `host`          | string | -         | Bind address (e.g. `0.0.0.0`).                            |
+| `port`          | u16    | -         | Bind port.                                                |
+| `hostname`      | string | -         | Public hostname (for logging / self-reference).           |
 | `real_ip_header`| string | `X-Real-IP` | Header to read the real client IP from (reverse proxy). |
 
 `real_ip_header` must only be enabled when a trusted reverse proxy overwrites
@@ -150,8 +150,8 @@ allowed (and must not also be blacklisted).
 | Format                  | Example                     | Matches                                   |
 |-------------------------|-----------------------------|-------------------------------------------|
 | Exact                   | `example.com`               | `example.com` only (case-insensitive).    |
-| Wildcard (`*`)          | `*.example.com`             | Any subdomain of `example.com`.            |
-| Regex (`/pattern/flags`)| `/^api\d+\.example\.com$/i`| Regex match (flags: `i`, `m`, `s`, `x`).  |
+| Wildcard (`*`)          | `*.example.com`             | Any subdomain of `example.com`.           |
+| Regex (`/pattern/flags`)| `/^api\d+\.example\.com$/i`| Regex match (flags: `i`, `m`, `s`, `x`).   |
 
 ### `connection.rate_limit`
 
@@ -162,9 +162,9 @@ simultaneously; the first to fail returns `429 Too Many Requests` with
 ```yaml
 rate_limit:
   - window: 1 # seconds
-	max: 5 # requests
+	  max: 5 # requests
   - window: 60
-	max: 500
+	  max: 500
 ```
 
 ### `connection.bandwidth_limit`
@@ -176,10 +176,10 @@ Per-(requesting-origin, client-IP) byte-bandwidth limits. Byte counts use
 ```yaml
 bandwidth_limit:
   connection: # per-(origin, ip) windowed byte cap
-	- window: 60 # seconds
-	  max: 1024 * 1024 * 4096 # 4 GiB
+    - window: 60 # seconds
+      max: 1024 * 1024 * 4096 # 4 GiB
   result: # hard cap on a single response body
-	max: 1024 * 1024 * 512 # 512 MiB
+	  max: 1024 * 1024 * 512 # 512 MiB
 ```
 
 If a response's `Content-Length` exceeds `result.max`, it is rejected with
@@ -199,7 +199,7 @@ preserves the upstream `Content-Length`.
 
 | Field          | Type | Description                                          |
 |----------------|------|------------------------------------------------------|
-| `max_redirects`| u32  | Max redirects to follow (`0` disables).             |
+| `max_redirects`| u32  | Max redirects to follow (`0` disables).              |
 | `timeout`      | u64  | Upstream request timeout in seconds.                 |
 
 Redirects are followed manually up to `max_redirects`, including relative
@@ -272,12 +272,12 @@ src/
 
 **Key crates:**
 
-- [`axum`](https://crates.io/crates/axum) 0.8 - HTTP server.
-- [`axum-limit`](https://crates.io/crates/axum-limit) 0.1 - request-count
+- [`axum`](https://crates.io/crates/axum) - HTTP server.
+- [`axum-limit`](https://crates.io/crates/axum-limit) - request-count
   rate limiting (extractor-based, tiered, per-key).
-- [`noyalib`](https://crates.io/crates/noyalib) 0.0 - YAML config parsing
+- [`noyalib`](https://crates.io/crates/noyalib) - YAML config parsing
   (strict mode for typo detection).
-- [`reqwest`](https://crates.io/crates/reqwest) 0.12 - upstream HTTP client
+- [`reqwest`](https://crates.io/crates/reqwest) - upstream HTTP client
   (raw passthrough, no transparent decompression).
 
 ## Guarantees
