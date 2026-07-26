@@ -162,9 +162,9 @@ simultaneously; the first to fail returns `429 Too Many Requests` with
 ```yaml
 rate_limit:
   - window: 1 # seconds
-	  max: 5 # requests
+    max: 5 # requests
   - window: 60
-	  max: 500
+    max: 500
 ```
 
 ### `connection.bandwidth_limit`
@@ -179,7 +179,7 @@ bandwidth_limit:
     - window: 60 # seconds
       max: 1024 * 1024 * 4096 # 4 GiB
   result: # hard cap on a single response body
-	  max: 1024 * 1024 * 512 # 512 MiB
+    max: 1024 * 1024 * 512 # 512 MiB
 ```
 
 If a response's `Content-Length` exceeds `result.max`, it is rejected with
