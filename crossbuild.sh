@@ -18,6 +18,7 @@ TARGETS=(
   "riscv64gc-unknown-linux-gnu"
   "x86_64-pc-windows-msvc"
   "x86_64-apple-darwin"
+  "aarch64-apple-darwin"
 )
 
 if command -v cross >/dev/null 2>&1; then
@@ -30,7 +31,7 @@ fi
 
 for target in "${TARGETS[@]}"; do
   case "$target" in
-    x86_64-pc-windows-msvc|x86_64-apple-darwin)
+    x86_64-pc-windows-msvc|x86_64-apple-darwin|aarch64-apple-darwin)
       COMMAND="cargo"
       ;;
     *)

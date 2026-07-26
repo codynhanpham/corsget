@@ -37,6 +37,8 @@ call :build_cargo x86_64-pc-windows-msvc
 if errorlevel 1 goto :failed
 call :build_cargo x86_64-apple-darwin
 if errorlevel 1 goto :failed
+call :build_cargo aarch64-apple-darwin
+if errorlevel 1 goto :failed
 
 echo All targets built successfully.
 popd

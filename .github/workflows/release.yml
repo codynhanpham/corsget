@@ -104,6 +104,9 @@ jobs:
                     - target: x86_64-apple-darwin
                       runner: macos-latest
                       archive: tar.gz
+                    - target: aarch64-apple-darwin
+                      runner: macos-latest
+                      archive: tar.gz
         runs-on: ${{ matrix.runner }}
         steps:
             - name: Check out repository
