@@ -30,7 +30,7 @@ The project was first bootstrapped with a mix of AI models given a specification
 Download the latest release from [GitHub Releases](https://github.com/codynhanpham/corsget/releases) and run it. The first launch creates a `config.yaml` beside the executable. Edit it as needed and restart. Then proxy requests through the server.
 ```sh
 # 1. Run. On the first launch without a config argument, an annotated
-#    config.yaml is created beside the executable from the embedded template.
+# config.yaml is created beside the executable from the embedded template.
 ./corsget
 
 # 2. Edit config.yaml as needed and restart.
@@ -50,7 +50,7 @@ the current working directory. The template is also available at
 
 A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](docker-compose.yml) are provided for convenience. To use them, you first must clone the project to build the image locally. A prebuilt image might be published on Docker Hub in the future.
 
-1. Clone the repo and build the image:
+1. Clone the repo:
 	```sh
 	git clone https://github.com/codynhanpham/corsget.git
 	cd corsget
@@ -76,8 +76,8 @@ A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](docker-compose.yml) ar
 You can also build the project (or download a release) and run it as a `systemd` service. A sample unit file is provided in [`corsget.service`](corsget.service).
 
 Please see more details in the example unit file. Main points to note are:
-1. Copy the unit file to `/etc/systemd/system/corsget.service` and edit it as needed.
-2. Select a user to run the service as: either a dedicated user, or as your own user. If you choose a dedicated user, make sure to create it first and give it permission to read the config file.
+1. Copy or symlink the unit file to `/etc/systemd/system/corsget.service` and edit it as needed.
+2. Select a user to run the service as: either a dedicated user, or as your own user. If you choose a dedicated user, make sure to create it first and give it permission to read the config file and run the executable.
 3. Point the `WorkingDirectory=` to the directory where the config file is located. The default is `/etc/corsget`.
 4. Update the `Environment=CORSGET_CONFIG=` line to point to your config file. The default is `/etc/corsget/config.yaml`.
 5. Update `ExecStart=` to point to the corsget binary. The default is `/usr/local/bin/corsget`.
