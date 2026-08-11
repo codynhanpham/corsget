@@ -112,16 +112,18 @@ impl BandwidthLimiter {
     }
 
     /// Charge `n` bytes against every tier for the given bucket key.
-    /// Returns the first tier error encountered (all tiers are still
-    /// charged up to the failing one).
+    /// Returns the first tier error encountered after attempting every tier.
     pub fn charge(&self, bucket: &str, n: u64) -> Result<(), BandwidthError> {
+        let mut first_error = None;
         for (window, map) in self.tiers.iter() {
             let mut state = map
                 .entry(bucket.to_string())
                 .or_insert_with(WindowState::new);
-            state.charge(n, *window)?;
+            if let Err(error) = state.charge(n, *window) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -293,6 +295,18 @@ mod tests {
             assert!(limiter.charge("k", 1).is_ok());
         }
         // 6th exceeds the 1s/5 tier.
+        assert!(limiter.charge("k", 1).is_err());
+    }
+
+    #[test]
+    fn later_tiers_are_charged_after_an_earlier_tier_exceeds() {
+        let limiter = BandwidthLimiter::new(&[tier(60, 5), tier(60, 6)]);
+
+        assert!(limiter.charge("k", 5).is_ok());
+        assert!(limiter.charge("k", 2).is_err());
+
+        // The second tier was charged despite the first tier failing on the
+        // previous call, so another byte also exceeds it.
         assert!(limiter.charge("k", 1).is_err());
     }
 

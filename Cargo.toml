@@ -6,7 +6,7 @@ homepage = "https://github.com/codynhanpham/corsget"
 repository = "https://github.com/codynhanpham/corsget"
 license = "MIT"
 keywords = ["cors", "proxy", "get", "http", "rust"]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -17,14 +17,16 @@ bytes = "1"
 dashmap = "6"
 futures = "0.3"
 http = "1"
+httpdate = "1"
 local-ip-address = "0.6.13"
 noyalib = "0.0.16"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util"] }
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

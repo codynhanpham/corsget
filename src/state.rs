@@ -1,7 +1,9 @@
 //! Shared application state, cloned (via [`Arc`]) into every request.
 
 use axum_limit::LimitState;
+use std::path::Path;
 
+use crate::cache::Cache;
 use crate::config::Config;
 use crate::extractors::RateLimitKey;
 use crate::limit::BandwidthLimiter;
@@ -23,11 +25,13 @@ pub struct AppState {
     pub bandwidth: BandwidthLimiter,
     /// Reusable upstream HTTP client.
     pub http_client: reqwest::Client,
+    /// Optional persistent response cache.
+    pub cache: Option<Cache>,
 }
 
 impl AppState {
     /// Construct the shared state from a loaded config.
-    pub fn new(config: Config) -> Result<Self, crate::error::AppError> {
+    pub fn new(config: Config, config_path: &Path) -> Result<Self, crate::error::AppError> {
         let match_policy = MatchPolicy::new(
             &config.connection.target.blacklist,
             &config.connection.target.whitelist,
@@ -38,6 +42,7 @@ impl AppState {
 
         let limit_state = LimitState::<RateLimitKey>::default();
         let bandwidth = BandwidthLimiter::new(&config.connection.bandwidth_limit.connection);
+        let cache = Cache::new(&config.cache, config_path);
 
         let http_client = reqwest::Client::builder()
             // We handle redirects manually so the Authorization header
@@ -58,6 +63,7 @@ impl AppState {
             limit_state,
             bandwidth,
             http_client,
+            cache,
         })
     }
 }

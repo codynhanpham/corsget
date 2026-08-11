@@ -12,6 +12,9 @@ services:
     volumes:
       # Set CORSGET_CONFIG_FILE when the host config is not ./config.yml.
       - ${CORSGET_CONFIG_FILE:-./config.yml}:/etc/corsget/config.yml:ro
+      # Required only when cache.enabled is true. The bundled config.yml uses
+      # this path; custom configurations should use it as well.
+      - ${CORSGET_CACHE_DIR:-./.cache}:/var/cache/corsget:rw
     # The image runs as UID 10001 and does not contain a shell or package manager.
     ports:
       # Host as `port : container` port. 

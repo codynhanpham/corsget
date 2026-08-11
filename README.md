@@ -2,10 +2,10 @@
 
 `GET` requests to any URL. CORS restrictions no more.
 
-A backend proxy server that fetches any URL on your behalf, bypassing
+A backend proxy server that fetches allowed URLs on your behalf, bypassing
 client-side CORS restrictions. Point your browser requests at
 `<proxy-host>/<target-url>` and the server fetches the target and returns
-the exact response - status, headers, and body - with permissive CORS
+the upstream status and body with proxy-safe headers and permissive CORS
 headers attached.
 
 ## Why?
@@ -27,13 +27,13 @@ The project was first bootstrapped with a mix of AI models given a specification
 
 ### Manually
 
-Download the latest release from [GitHub Releases](https://github.com/codynhanpham/corsget/releases) and run it. The first launch creates a `config.yaml` beside the executable. Edit it as needed and restart. Then proxy requests through the server.
+Download the latest release from [GitHub Releases](https://github.com/codynhanpham/corsget/releases) and run it. The first launch creates a `config.yml` beside the executable. Edit it as needed and restart. Then proxy requests through the server.
 ```sh
 # 1. Run. On the first launch without a config argument, an annotated
-# config.yaml is created beside the executable from the embedded template.
+# config.yml is created beside the executable from the embedded template.
 ./corsget
 
-# 2. Edit config.yaml as needed and restart.
+# 2. Edit config.yml as needed and restart.
 
 # 3. Proxy a request.
 curl -i "http://localhost:9647/https://httpbin.org/get"
@@ -41,7 +41,7 @@ curl -i "http://localhost:9647/https://httpbin.org/get"
 
 You can also download the source code and build it yourself with `cargo build --release`.
 
-The server listens on `host:port` from `config.yaml` (default
+The server listens on `host:port` from `config.yml` (default
 `127.0.0.1:9647` and `[::1]:9647`). The default file is created beside the executable, not in
 the current working directory. The template is also available at
 [`config.example.yml`](config.example.yml).
@@ -55,20 +55,24 @@ A [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](docker-compose.yml) ar
 	git clone https://github.com/codynhanpham/corsget.git
 	cd corsget
 	```
+
 2. Copy and update the config file:
 	```sh
-	cp config.example.yml config.yaml
-	# Edit config.yaml as needed.
+	cp config.example.yml config.yml
+	# Edit config.yml as needed.
 	```
+
 3. Update the `docker-compose.yml` as needed to change the host port or mount a custom config file. Config file can also be specified via the `CORSGET_CONFIG_FILE` host environment variable to pass into the container.
+
 4. Start the container:
 	```sh
 	# Optionally, specify a custom config file path:
-	export CORSGET_CONFIG_FILE=/path/to/config.yaml
+  	export CORSGET_CONFIG_FILE=/path/to/config.yml
 
 	# Build locally & Start the container
 	docker compose up -d
 	```
+
 	More docker-compose documentations is also noted at the end of the [`docker-compose.yml`](docker-compose.yml) file.
 
 ### Systemd Service
@@ -79,7 +83,7 @@ Please see more details in the example unit file. Main points to note are:
 1. Copy or symlink the unit file to `/etc/systemd/system/corsget.service` and edit it as needed.
 2. Select a user to run the service as: either a dedicated user, or as your own user. If you choose a dedicated user, make sure to create it first and give it permission to read the config file and run the executable.
 3. Point the `WorkingDirectory=` to the directory where the config file is located. The default is `/etc/corsget`.
-4. Update the `Environment=CORSGET_CONFIG=` line to point to your config file. The default is `/etc/corsget/config.yaml`.
+4. Update the `Environment=CORSGET_CONFIG=` line to point to your config file. The default is `/etc/corsget/config.yml`.
 5. Update `ExecStart=` to point to the corsget binary. The default is `/usr/local/bin/corsget`.
 
 Then, enable and start the service:
@@ -114,7 +118,7 @@ schemes are allowed; others return `400 Bad Request`.
 
 ## Configuration
 
-Config is loaded from `config.yaml` beside the executable (override with a
+Config is loaded from `config.yml` beside the executable (override with a
 CLI arg or the `CORSGET_CONFIG` env var). If the implicit default file does
 not exist, **`corsget`** creates it from the embedded template. Existing invalid config files
 are never overwritten. Unknown keys are rejected (strict parsing) to catch
@@ -125,25 +129,28 @@ example.
 
 | Field           | Type   | Default   | Description                                               |
 |-----------------|--------|-----------|-----------------------------------------------------------|
-| `host`          | string | -         | Bind address (e.g. `0.0.0.0`).                            |
+| `host`          | string or list[string] | - | Bind address(es), e.g. `0.0.0.0` or `[127.0.0.1, "[::1]"]`. |
 | `port`          | u16    | -         | Bind port.                                                |
-| `hostname`      | string | -         | Public hostname (for logging / self-reference).           |
+| `hostname`      | string | -         | Public hostname shown in startup logs.                    |
 | `real_ip_header`| string | `X-Real-IP` | Header to read the real client IP from (reverse proxy). |
 
-`real_ip_header` must only be enabled when a trusted reverse proxy overwrites
-and validates that header. Values that are not valid IPv4 or IPv6 addresses are
-ignored and the TCP peer address is used instead.
+`real_ip_header` is trusted whenever it contains a valid IPv4 or IPv6 address;
+the application does not verify that the TCP peer is a trusted proxy. Enable it
+only when the service is reachable through a reverse proxy that overwrites and
+validates the header. Otherwise, clients can spoof their rate-limit identity.
 
 ### `connection.target` / `connection.origin`
 
 Each is a blacklist + whitelist pair. If both are empty, everything is
-allowed. If the whitelist is non-empty, only whitelisted entries are
-allowed (and must not also be blacklisted).
+allowed. The blacklist is evaluated first, but a matching whitelist entry
+overrides the blacklist. When the whitelist is non-empty, entries matching
+neither list are denied. For the origin policy specifically, requests without
+a valid `Origin` or `Referer` are also denied when the whitelist is non-empty.
 
 | Field        | Type         | Description                                           |
 |--------------|--------------|-------------------------------------------------------|
-| `blacklist`  | list[string] | Denied entries.                                       |
-| `whitelist`  | list[string] | Allowed entries (takes precedence when non-empty).    |
+| `blacklist`  | list[string] | Denied entries, evaluated before the whitelist.       |
+| `whitelist`  | list[string] | Allowed entries; a match overrides the blacklist.    |
 
 **Entry formats** (auto-detected):
 
@@ -152,6 +159,12 @@ allowed (and must not also be blacklisted).
 | Exact                   | `example.com`               | `example.com` only (case-insensitive).    |
 | Wildcard (`*`)          | `*.example.com`             | Any subdomain of `example.com`.           |
 | Regex (`/pattern/flags`)| `/^api\d+\.example\.com$/i`| Regex match (flags: `i`, `m`, `s`, `x`).   |
+
+Origin rules match the hostname only; scheme and port are ignored. When the
+origin whitelist is non-empty, a valid `Origin` or `Referer` header is required.
+The default origin allowlist uses anchored regexes for the configured IPv4
+ranges (`10/8`, `192.168/16`, and `100/8`). These match only numeric IPv4
+addresses with octets from `0` to `255`.
 
 ### `connection.rate_limit`
 
@@ -208,15 +221,15 @@ policy before it is fetched.
 
 > [!IMPORTANT]
 > Client headers, including `Authorization`, are
-preserved across redirects, so **configure target allowlists accordingly**.
+> preserved across redirects, so **configure target allowlists accordingly**.
 
 ## Header forwarding
 
 All client request headers are forwarded to the target **except**:
 
 - **Hop-by-hop** (RFC 7230 §6.1): `Connection`, `Keep-Alive`,
-  `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailers`,
-  `Transfer-Encoding`, `Upgrade`.
+	`Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailers`,
+	`Transfer-Encoding`, `Upgrade`.
 - **Proxy-injected**: `X-Forwarded-*`, `X-Real-IP`, `Forwarded`.
 - **`Host`**: set to the target's host.
 
@@ -240,6 +253,72 @@ Every response carries:
 which is required for non-simple GETs (e.g. those with `Authorization`) to
 work from a browser. Preflight targets and requesting origins are checked
 against the same policies as the corresponding `GET`.
+Preflight requests are exempt from request-rate and bandwidth accounting.
+
+### `cache`
+
+The optional disk cache is disabled by default and is whitelist-only. A cache
+entry is created only when `enabled` is `true`, `max_age` and `max_size` are
+non-zero, and the requested target matches a `whitelist` rule. Rules match
+the normalized `host/path?query`; schemes are ignored and URL fragments are
+not included. Exact, wildcard, and regex rules are supported. Hosts are
+matched case-insensitively, while paths and queries are case-sensitive. If
+multiple rules match, the last matching rule supplies the maximum age. A
+matching rule with `max_age: 0` disables caching for that target.
+
+```yaml
+cache:
+  enabled: true
+  max_age: 60 * 15 # global upper bound; matching rules may use a lower age
+  max_size: 1024 * 1024 * 1024
+  location: .cache
+  whitelist:
+    - match: "api.example.com/*"
+      max_age: 60 * 5
+```
+
+Relative `location` paths are resolved relative to the configuration file.
+The directory is created at startup. If it cannot be created or written, the
+proxy continues with caching disabled. The size limit includes cached body
+and metadata files; entries larger than the total limit are served but are
+not stored. Least-recently-used entries are removed when the limit is
+exceeded.
+
+Only successful `2xx` responses are cached. `Cache-Control` and `Expires` are
+honored, with the configured age acting as an upper bound. Responses marked
+`no-store`, `private`, or containing `Set-Cookie` are not stored. `no-cache`
+responses are revalidated on every lookup. Stale entries use `ETag` and
+`Last-Modified` validators; a `304 Not Modified` response refreshes the
+cached metadata and serves the stored body.
+
+Requests containing `Authorization`, `Cookie`, or `Range` bypass the cache.
+Supported `Vary` headers (`Accept`, `Accept-Language`, `Accept-Encoding`,
+`Origin`, and `Authorization`) are included in the cache identity. Public
+requests that do not contain `Authorization` may be cached even when the
+upstream response declares `Vary: Authorization`; the unauthenticated
+authorization variant is kept separate in the cache identity. Requests
+containing `Authorization` always bypass cache lookup and storage, and
+authenticated responses are never cached. `Vary: *` and unsupported variance
+bypass caching. Cache hits still consume request-rate and bandwidth limits.
+Cache-eligible responses include `X-Cache: HIT`, `MISS`, or `REVALIDATED`; this
+diagnostic header is not stored in the cache. Cache-disabled or cache-ineligible
+requests do not receive an `X-Cache` header.
+
+A consumer can force an existing cache entry to be revalidated by sending
+`Cache-Control: no-cache`:
+
+```sh
+curl -i \
+  -H "Cache-Control: no-cache" \
+  "https://proxy.example/https://api.example.com/data"
+```
+
+This bypasses a fresh cache hit and forwards the request to the target. If
+the cached response has an `ETag` or `Last-Modified` value, the proxy sends
+the corresponding conditional request headers. A `304 Not Modified` response
+serves the cached body; a new successful response replaces the cached entry.
+Both cases return `X-Cache: REVALIDATED`. This directive revalidates the
+entry; it does not delete it before the target responds.
 
 ## Error responses
 
@@ -247,12 +326,15 @@ against the same policies as the corresponding `GET`.
 |--------|----------------------------------------------------|
 | `400`  | Invalid or missing target URL.                     |
 | `403`  | Target host or requesting origin denied by policy. |
-| `413`  | Response body exceeds per-result size cap.         |
+| `413`  | Declared response body exceeds the per-result cap before streaming. |
 | `429`  | Request-count rate limit exceeded.                 |
 | `502`  | Upstream request failed (network, timeout).        |
 | `503`  | Rate-limit storage backend failure.                |
 
-Error bodies are JSON: `{ "error": "<message>" }`.
+Application-generated error bodies are JSON: `{ "error": "<message>" }`.
+Unsupported methods return a JSON `405 Method Not Allowed` response; a
+mid-stream size-limit failure occurs after headers have been sent and therefore
+cannot be converted into a new HTTP `413` response.
 
 ## Architecture
 
@@ -263,9 +345,10 @@ src/
   matcher.rs     - MatchEntry { Exact | Wildcard | Regex } + TargetList
   extractors.rs  - Origin, ClientIp, RateLimitKey (axum_limit::Key)
   limit.rs       - BandwidthLimiter (fixed-window u64) + ResultSizeGuard
+  cache.rs       - whitelist-driven disk cache, revalidation, and LRU eviction
   cors.rs        - CORS headers + OPTIONS preflight + hop-by-hop list
-  proxy.rs       - proxy handler: validate, eval lists, stream response
-  state.rs       - AppState (config + limiters + reqwest client)
+  proxy.rs       - proxy handler: validate, cache, and stream response
+  state.rs       - AppState (config + cache + limiters + reqwest client)
   error.rs       - AppError → IntoResponse
 ```
 
@@ -273,20 +356,23 @@ src/
 
 - [`axum`](https://crates.io/crates/axum) - HTTP server.
 - [`axum-limit`](https://crates.io/crates/axum-limit) - request-count
-  rate limiting (extractor-based, tiered, per-key).
+	rate limiting (extractor-based, tiered, per-key).
 - [`noyalib`](https://crates.io/crates/noyalib) - YAML config parsing
-  (strict mode for typo detection).
+	(strict mode for typo detection).
 - [`reqwest`](https://crates.io/crates/reqwest) - upstream HTTP client
-  (raw passthrough, no transparent decompression).
+	(raw passthrough, no transparent decompression).
 
 ## Guarantees
 
 - Only `GET` requests are proxied.
-- The exact upstream response (status, headers, body) is returned.
+- The upstream response status and body are returned with hop-by-hop and
+	proxy-injected headers removed; CORS headers are added and cached hits
+	additionally include the generated `X-Cache` diagnostic header.
 - Rate limits and bandwidth limits are enforced per requesting origin per
-  client IP.
+	client IP.
 - Bandwidth is enforced while streaming proxied response bodies. Generated
-  proxy errors are returned immediately and are not charged to the byte
-  limiter.
-- The server streams responses; large responses are not buffered in
-  memory (subject to the per-result cap).
+	proxy errors are returned immediately and are not charged to the byte
+	limiter.
+- The server streams responses; large responses are not buffered in memory
+	(subject to the per-result cap). Cache misses are written to disk while
+	they are streamed to the client.

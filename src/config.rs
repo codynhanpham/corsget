@@ -20,6 +20,9 @@ pub struct Config {
     pub connection: ConnectionConfig,
     /// Proxy behaviour: redirects, timeouts.
     pub proxy: ProxyConfig,
+    /// Optional persistent response cache.
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 /// Application server settings.
@@ -107,8 +110,8 @@ pub struct ConnectionConfig {
 }
 
 /// A blacklist + whitelist pair. If both are empty, everything is allowed.
-/// If the whitelist is non-empty, only whitelisted entries are allowed
-/// (and must not also be blacklisted).
+/// The blacklist is evaluated first, but a matching whitelist entry overrides
+/// it. If the whitelist is non-empty, entries matching neither list are denied.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetListConfig {
@@ -116,8 +119,8 @@ pub struct TargetListConfig {
     /// `- #` comment-only YAML list items) are filtered out.
     #[serde(default, deserialize_with = "deserialize_non_empty_strings")]
     pub blacklist: Vec<String>,
-    /// Allowed entries (exact / wildcard / regex). Takes precedence over
-    /// the blacklist when non-empty.
+    /// Allowed entries (exact / wildcard / regex). A matching entry overrides
+    /// the blacklist; a non-matching entry is denied when this list is non-empty.
     #[serde(default, deserialize_with = "deserialize_non_empty_strings")]
     pub whitelist: Vec<String>,
 }
@@ -273,6 +276,50 @@ pub struct ProxyConfig {
     pub timeout: u64,
 }
 
+/// Persistent response-cache configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Enable disk-backed response caching.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Default maximum age of cached responses in seconds.
+    #[serde(default, deserialize_with = "deserialize_cache_number")]
+    pub max_age: u64,
+    /// Maximum size of committed cache files in bytes.
+    #[serde(default, deserialize_with = "deserialize_cache_number")]
+    pub max_size: u64,
+    /// Cache directory. Relative paths are resolved beside the config file.
+    #[serde(default)]
+    pub location: String,
+    /// Whitelist rules that enable caching for matching target URLs.
+    #[serde(default)]
+    pub whitelist: Vec<CacheRule>,
+}
+
+/// A cache URL rule and its maximum response age.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheRule {
+    /// Host/path/query pattern. The optional URL scheme is ignored.
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// Maximum age for matching responses. Zero explicitly disables caching.
+    #[serde(deserialize_with = "deserialize_cache_number")]
+    pub max_age: u64,
+}
+
+fn deserialize_cache_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_byte_count(deserializer).map_err(|error| {
+        serde::de::Error::custom(format!(
+            "cache value is invalid: {error}; use a whole number or a multiplication expression"
+        ))
+    })
+}
+
 fn deserialize_window<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
@@ -389,6 +436,26 @@ mod tests {
         assert_eq!(cfg.connection.bandwidth_limit.result.max, 1024 * 1024 * 512);
         assert_eq!(cfg.proxy.max_redirects, 10);
         assert_eq!(cfg.proxy.timeout, 30);
+        assert!(!cfg.cache.enabled);
+        assert_eq!(cfg.cache.max_age, 60 * 15);
+        assert_eq!(cfg.cache.max_size, 1024 * 1024 * 1024 * 10);
+        assert_eq!(cfg.cache.location, ".cache");
+        assert!(cfg.cache.whitelist.is_empty());
+    }
+
+    #[test]
+    fn missing_cache_defaults_to_disabled() {
+        let yaml = "
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection: { target: {}, origin: {} }
+proxy: { max_redirects: 10, timeout: 30 }
+";
+        let tmp = std::env::temp_dir().join("corsget_test_missing_cache.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let cfg = Config::load(&tmp).unwrap();
+        assert!(!cfg.cache.enabled);
+        assert!(cfg.cache.whitelist.is_empty());
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

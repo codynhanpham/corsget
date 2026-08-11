@@ -6,8 +6,8 @@ application:
     # - 0.0.0.0
     # - "[::]"
   port: 9647
-  # The hostname to use for generating URLs and headers.
-  # This should be the public hostname of the server, not the local address.
+  # Public hostname shown in startup logs. This should be the public hostname
+  # of the server, not the local bind address.
   hostname: localhost
 
   # Which header to use for determining the real IP address of the client.
@@ -17,7 +17,8 @@ application:
 connection:
   target:
     ## Targets origin to allow or deny requests from ##
-    # Either as a blacklist or whitelist. If both are defined, the whitelist will take precedence.
+    # The blacklist is evaluated first, but a matching whitelist entry overrides it.
+    # If the whitelist is non-empty, entries matching neither list are denied.
     # If both are empty, all targets will be allowed.
     # Format: exact, wildcard, or regex matches
     blacklist:
@@ -27,7 +28,8 @@ connection:
 
   origin:
     ## Origins of the requesting site to allow or deny requests from ##
-    # Either as a blacklist or whitelist. If both are defined, the whitelist will take precedence.
+    # The blacklist is evaluated first, but a matching whitelist entry overrides it.
+    # If the whitelist is non-empty, entries matching neither list are denied.
     # If both are empty, all origins will be allowed.
     # Format: exact, wildcard, or regex matches
     blacklist:
@@ -36,9 +38,10 @@ connection:
       # Default only allow local requests to the proxy server to avoid abuse. Add your own domains or IPs to the whitelist to allow them to use the proxy.
       - localhost
       - 127.0.0.1
-      - 10.*
-      - 192.168.*
-      - 100.*
+      # IPv4-only regexes; each octet must be in the range 0-255.
+      - '/^10(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/'
+      - '/^192\.168(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){2}$/'
+      - '/^100(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/'
       - #
 
   rate_limit:
@@ -56,11 +59,11 @@ connection:
       # Maximum number of bytes per window per requester origin per client IP address.
       # All limit tiers applies
       - window: 60 # seconds
-        max: 1024 * 1024 * 4096 # bytes == 4GB
+        max: 1024 * 1024 * 4096 # bytes == 4 GiB
 
     result:
       # Maximum number of bytes per response body
-      max: 1024 * 1024 * 512 # bytes == 512MB
+      max: 1024 * 1024 * 512 # bytes == 512 MiB
 
 proxy:
   # Maximum number of redirects to follow when proxying a request. Set to 0 to disable following redirects.
@@ -68,3 +71,43 @@ proxy:
 
   # Maximum number of seconds to wait for a response from the target server before timing out.
   timeout: 30
+
+
+# Optional disk cache. It is disabled by default and only explicitly
+# whitelisted targets are cached. Rules match host/path?query; schemes are
+# ignored, fragments are ignored, and later matching rules override earlier ones.
+cache:
+  # Enable or disable caching of proxied requests.
+  enabled: false
+
+  # The default maximum age of cached responses in seconds.
+  # Cached responses older than this will be considered stale and will be revalidated with the target server.
+  # Specific targets or requests matched by regex in whitelist can set their
+  # own max_age up to this global upper bound.
+  # Set to 0 to disable caching of responses.
+  max_age: 60 * 15 # seconds == 15 minutes
+
+  # The maximum number of bytes to allocate for the cache in total.
+  # Exceeding this limit will cause the cache to evict the least recently used entries.
+  # Set to 0 to disable caching.
+  max_size: 1024 * 1024 * 1024 * 10 # bytes == 10 GB
+
+  # The location to store cached responses on disk. If empty, the cache will be stored at .cache/ beside the config file.
+  # If the directory does not exist, it will be created.
+  # If the directory is not writable, caching will be disabled with a warning.
+  location: ".cache"
+
+  whitelist: []
+    # Specific targets or requests can set max_age up to the global max_age.
+    # Format: exact, wildcard, or regex matches
+    # Example:
+    # - match: "https://example.com/api/*"
+    #   max_age: 60 * 5 # seconds == 5 minutes
+
+    # Enable this to cache all requests by default
+    # Typically, this is not desired, as it can lead to caching of sensitive data, frequently changing data, or abuse of the cache by external users.
+    # - match: "*"
+    #   max_age: 60 * 15 # seconds == 15 minutes
+
+    # - match: "raw.githubusercontent.com/*"
+    #   max_age: 60 * 20 # seconds == 20 minutes

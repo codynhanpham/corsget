@@ -3,7 +3,8 @@
 //! Flow:
 //! 1. Extract the target URL from the request path (strip leading `/`,
 //!    prepend `https://` if no scheme).
-//! 2. Validate the URL and evaluate target + origin allow/deny lists.
+//! 2. Validate the URL and evaluate target + origin policies. Blacklists are
+//!    evaluated first, but matching whitelist entries override them.
 //! 3. Enforce request-count rate limits (all configured tiers) via
 //!    [`axum_limit`]'s [`LimitState`].
 //! 4. Build an upstream GET request, forwarding client headers minus
@@ -29,6 +30,50 @@ use crate::error::AppError;
 use crate::extractors::RateLimitKey;
 use crate::limit::{ResultSizeGuard, metered_stream};
 use crate::state::AppState;
+
+fn cached_response(
+    state: &AppState,
+    cache: &crate::cache::Cache,
+    entry: &crate::cache::CacheEntry,
+    bucket: String,
+    result_max: u64,
+    cache_status: &'static str,
+) -> Result<Response, AppError> {
+    let status = StatusCode::from_u16(entry.status)
+        .map_err(|error| AppError::Upstream(format!("invalid cached status: {error}")))?;
+    let mut headers = crate::cache::headers_from_entry(entry);
+    if result_max != 0 {
+        headers.remove(header::CONTENT_LENGTH);
+    }
+    crate::cache::add_cache_header(&mut headers, cache_status);
+    let result_guard = ResultSizeGuard::new(result_max);
+    if result_guard.would_exceed(entry.body_len) {
+        return Err(AppError::TooLarge(format!(
+            "cached response body ({}) exceeds per-result cap ({result_max})",
+            entry.body_len
+        )));
+    }
+    let body_stream = crate::cache::file_stream(cache.entry_body_path(entry).to_path_buf());
+    let metered = metered_stream(
+        body_stream,
+        state.bandwidth.clone(),
+        bucket.clone(),
+        result_guard,
+    );
+    let log_bucket = bucket;
+    let mapped = metered.map(move |item| match item {
+        Ok(bytes) => Ok::<bytes::Bytes, std::io::Error>(bytes),
+        Err(error) => {
+            tracing::warn!(bucket = %log_bucket, error = %error, "cached response stream ended with error");
+            Err(std::io::Error::other(error.to_string()))
+        }
+    });
+    let mut response = Response::builder().status(status);
+    *response.headers_mut().unwrap() = headers;
+    response.body(Body::from_stream(mapped)).map_err(|error| {
+        AppError::Upstream(format!("failed to build cached response body: {error}"))
+    })
+}
 
 /// Parse the target URL from the incoming request's URI.
 ///
@@ -155,13 +200,20 @@ pub(crate) fn validate_target_policy(
             "target `{target_host}` is not allowed"
         )));
     }
-    if let Some(ref origin_host) = origin.0
-        && !state.match_policy.origin.is_allowed(origin_host)
-    {
-        tracing::info!(%origin_host, "origin denied by policy");
-        return Err(AppError::Denied(format!(
-            "origin `{origin_host}` is not allowed"
-        )));
+    match &origin.0 {
+        Some(origin_host) if !state.match_policy.origin.is_allowed(origin_host) => {
+            tracing::info!(%origin_host, "origin denied by policy");
+            return Err(AppError::Denied(format!(
+                "origin `{origin_host}` is not allowed"
+            )));
+        }
+        None if state.match_policy.origin.has_whitelist() => {
+            tracing::info!("request denied because no valid origin was provided");
+            return Err(AppError::Denied(
+                "a valid Origin or Referer header is required".to_string(),
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -200,7 +252,12 @@ pub async fn proxy_handler(
     };
     let bucket = key.bucket();
     for tier in &state.config.connection.rate_limit {
-        let quota = Quota::new(tier.max as usize, tier.window * 1000);
+        // axum-limit stores request counts as usize and periods as milliseconds.
+        // Clamp configured u64 values rather than allowing truncation or
+        // multiplication overflow on unusual configurations/platforms.
+        let max = tier.max.min(usize::MAX as u64) as usize;
+        let period_ms = tier.window.saturating_mul(1000);
+        let quota = Quota::new(max, period_ms);
         let snapshot = limit_state
             .check(key.clone(), quota)
             .await
@@ -220,8 +277,36 @@ pub async fn proxy_handler(
         }
     }
 
-    // --- 4. Build upstream request ---
-    let forwarded = forward_headers(req.headers(), &target_url);
+    // --- 4. Check the persistent response cache ---
+    let cache_plan = state
+        .cache
+        .as_ref()
+        .and_then(|cache| cache.plan(&target_url, req.headers()));
+    let cached_entry = if let (Some(cache), Some(plan)) = (&state.cache, &cache_plan) {
+        cache.lookup(plan, crate::cache::now()).await
+    } else {
+        None
+    };
+    let force_revalidation = crate::cache::request_requires_revalidation(req.headers());
+    if let (Some(cache), Some(entry)) = (&state.cache, cached_entry.as_ref())
+        && !force_revalidation
+        && crate::cache::Cache::is_fresh(entry, crate::cache::now())
+    {
+        return cached_response(
+            &state,
+            cache,
+            entry,
+            bucket,
+            state.config.connection.bandwidth_limit.result.max,
+            "HIT",
+        );
+    }
+
+    // --- 5. Build upstream request ---
+    let mut forwarded = forward_headers(req.headers(), &target_url);
+    if let Some(entry) = cached_entry.as_ref() {
+        crate::cache::Cache::add_validators(&mut forwarded, entry);
+    }
     tracing::info!(
         %target_url,
         has_auth = forwarded.contains_key(header::AUTHORIZATION),
@@ -232,7 +317,7 @@ pub async fn proxy_handler(
         .get(target_url.as_str())
         .headers(forwarded);
 
-    // --- 5. Send with manual redirect-following ---
+    // --- 6. Send with manual redirect-following ---
     // reqwest's built-in redirect strips the Authorization header on
     // cross-host redirects (e.g. api.github.com → release-assets.githubusercontent.com).
     // We follow redirects manually so all client headers survive.
@@ -241,6 +326,25 @@ pub async fn proxy_handler(
     let mut redirect_base = target_url.clone();
     let upstream_response = loop {
         let resp = upstream_req.send().await.map_err(AppError::from)?;
+        if resp.status() == StatusCode::NOT_MODIFIED
+            && let (Some(cache), Some(plan), Some(mut entry)) =
+                (&state.cache, &cache_plan, cached_entry.clone())
+        {
+            cache
+                .refresh(&mut entry, resp.headers(), plan.ttl())
+                .await
+                .map_err(|error| {
+                    AppError::Upstream(format!("failed to refresh cache metadata: {error}"))
+                })?;
+            return cached_response(
+                &state,
+                cache,
+                &entry,
+                bucket,
+                state.config.connection.bandwidth_limit.result.max,
+                "REVALIDATED",
+            );
+        }
         // `StatusCode::is_redirection()` also includes statuses such as
         // `304 Not Modified`, which are not redirect instructions and do not
         // have to contain a Location header. Only follow statuses that
@@ -264,11 +368,14 @@ pub async fn proxy_handler(
             .map_err(|e| AppError::BadUrl(e.to_string()))?;
         validate_target_policy(&state, &next_url, &origin)?;
         redirect_base = next_url.clone();
-        let forwarded = forward_headers(req.headers(), &next_url);
+        let mut forwarded = forward_headers(req.headers(), &next_url);
+        if let Some(entry) = cached_entry.as_ref() {
+            crate::cache::Cache::add_validators(&mut forwarded, entry);
+        }
         upstream_req = state.http_client.get(next_url).headers(forwarded);
     };
 
-    // --- 6. Build the proxied response ---
+    // --- 7. Build the proxied response ---
     // Per-result size cap: reject early if Content-Length exceeds it.
     let result_max = state.config.connection.bandwidth_limit.result.max;
     let result_guard = ResultSizeGuard::new(result_max);
@@ -293,6 +400,32 @@ pub async fn proxy_handler(
     // With no result cap, the proxy never truncates for bandwidth reasons and
     // can safely preserve the upstream Content-Length.
     let headers = copy_response_headers(upstream_response.headers(), result_max != 0);
+    let mut headers = headers;
+    if cache_plan.is_some() {
+        crate::cache::add_cache_header(
+            &mut headers,
+            if cached_entry.is_some() && force_revalidation {
+                "REVALIDATED"
+            } else {
+                "MISS"
+            },
+        );
+    }
+
+    // Begin an atomic cache write for eligible responses. Cache storage is
+    // best-effort: a write failure must not interrupt the client response.
+    let cache_writer = if let (Some(cache), Some(plan)) = (&state.cache, cache_plan) {
+        cache
+            .begin_write(
+                plan,
+                status.as_u16(),
+                upstream_response.headers(),
+                req.headers(),
+            )
+            .await
+    } else {
+        None
+    };
 
     // Wrap the upstream body stream with bandwidth + result-size accounting.
     let body_stream = upstream_response.bytes_stream();
@@ -303,17 +436,40 @@ pub async fn proxy_handler(
         result_guard,
     );
 
-    // Convert MeteredError items into a stream that axum's Body accepts.
-    // Only strict per-result or upstream errors end the stream. Connection
-    // bandwidth errors are handled as soft limits by `metered_stream`.
-    let mapped = metered.map(move |item| match item {
-        Ok(bytes) => Ok::<bytes::Bytes, std::io::Error>(bytes),
-        Err(e) => {
-            tracing::warn!(bucket = %bucket, error = %e, "stream ended with error");
-            // Yielding an Err terminates axum's Body stream.
-            Err(std::io::Error::other(e.to_string()))
+    // Convert MeteredError items into a stream that axum's Body accepts while
+    // teeing successful chunks into the temporary cache body.
+    let mapped = async_stream::stream! {
+        let mut metered = std::pin::pin!(metered);
+        let mut writer = cache_writer;
+        while let Some(item) = futures::StreamExt::next(&mut metered).await {
+            match item {
+                Ok(bytes) => {
+                    if let Some(active_writer) = writer.as_mut()
+                        && let Err(error) = active_writer.write(&bytes).await
+                    {
+                        tracing::debug!(%error, "cache write failed; continuing without caching");
+                        if let Some(active_writer) = writer.take() {
+                            active_writer.discard().await;
+                        }
+                    }
+                    yield Ok::<bytes::Bytes, std::io::Error>(bytes);
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "stream ended with error");
+                    if let Some(active_writer) = writer.take() {
+                        active_writer.discard().await;
+                    }
+                    yield Err(std::io::Error::other(error.to_string()));
+                    break;
+                }
+            }
         }
-    });
+        if let Some(active_writer) = writer
+            && let Err(error) = active_writer.finish().await
+        {
+            tracing::debug!(%error, "cache commit failed");
+        }
+    };
 
     let mut response = Response::builder().status(status);
     *response.headers_mut().unwrap() = headers;
@@ -449,6 +605,22 @@ mod tests {
         let out = copy_response_headers(&source, false);
 
         assert_eq!(out.get(header::CONTENT_LENGTH).unwrap(), "10");
+    }
+
+    #[test]
+    fn response_headers_preserve_authorization_vary() {
+        let mut source = HeaderMap::new();
+        source.insert(
+            header::VARY,
+            HeaderValue::from_static("Authorization, Accept-Encoding"),
+        );
+
+        let out = copy_response_headers(&source, true);
+
+        assert_eq!(
+            out.get(header::VARY).unwrap(),
+            "Authorization, Accept-Encoding"
+        );
     }
 
     #[test]

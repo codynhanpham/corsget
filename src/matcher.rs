@@ -12,8 +12,10 @@
 //!
 //! A [`TargetList`] holds a blacklist and a whitelist. The decision rule:
 //!
-//! - If the whitelist is non-empty, the subject must match at least one
-//!   whitelist entry **and** must not match any blacklist entry.
+//! - The blacklist is evaluated first, but a subject matching at least one
+//!   whitelist entry is allowed even when it also matches the blacklist.
+//! - If the whitelist is non-empty, a subject matching neither list is
+//!   denied.
 //! - Otherwise (whitelist empty), the subject is allowed unless it matches
 //!   a blacklist entry.
 //! - If both lists are empty, everything is allowed.
@@ -139,7 +141,7 @@ fn wildcard_to_regex(pattern: &str) -> String {
 pub struct TargetList {
     /// Denied entries.
     blacklist: Vec<MatchEntry>,
-    /// Allowed entries (takes precedence when non-empty).
+    /// Allowed entries. A matching entry overrides the blacklist.
     whitelist: Vec<MatchEntry>,
 }
 
@@ -163,12 +165,17 @@ impl TargetList {
     /// Returns `true` if `subject` is allowed by this list.
     pub fn is_allowed(&self, subject: &str) -> bool {
         let blacklisted = self.blacklist.iter().any(|e| e.is_match(subject));
-        if !self.whitelist.is_empty() {
-            let whitelisted = self.whitelist.iter().any(|e| e.is_match(subject));
-            whitelisted && !blacklisted
-        } else {
-            !blacklisted
-        }
+        let whitelisted = self.whitelist.iter().any(|e| e.is_match(subject));
+
+        // Evaluate the blacklist first, but let an explicit whitelist match
+        // override it. A non-empty whitelist remains restrictive for subjects
+        // that match neither list.
+        whitelisted || (!blacklisted && self.whitelist.is_empty())
+    }
+
+    /// Returns whether this policy requires an explicit whitelist match.
+    pub fn has_whitelist(&self) -> bool {
+        !self.whitelist.is_empty()
     }
 }
 
@@ -278,11 +285,40 @@ mod tests {
 
     #[test]
     fn whitelist_precedence_over_blacklist() {
-        // whitelist non-empty: must be whitelisted AND not blacklisted
+        // A whitelist match overrides a blacklist match.
         let l = list(&["bad.good.com"], &["*.good.com"]);
         assert!(l.is_allowed("ok.good.com"));
-        assert!(!l.is_allowed("bad.good.com")); // blacklisted
+        assert!(l.is_allowed("bad.good.com")); // blacklisted and whitelisted
         assert!(!l.is_allowed("evil.com")); // not whitelisted
+    }
+
+    #[test]
+    fn exact_whitelist_overrides_blacklist() {
+        let l = list(&["example.com"], &["example.com"]);
+        assert!(l.is_allowed("example.com"));
+    }
+
+    #[test]
+    fn wildcard_whitelist_overrides_blacklist() {
+        let l = list(&["*.example.com"], &["api.example.com"]);
+        assert!(l.is_allowed("api.example.com"));
+        assert!(!l.is_allowed("other.example.com"));
+    }
+
+    #[test]
+    fn regex_whitelist_overrides_blacklist() {
+        let l = list(
+            &["/^api\\d+\\.example\\.com$/"],
+            &["/^api1\\.example\\.com$/"],
+        );
+        assert!(l.is_allowed("api1.example.com"));
+        assert!(!l.is_allowed("api2.example.com"));
+    }
+
+    #[test]
+    fn broad_whitelist_overrides_blacklist() {
+        let l = list(&["*.evil.com"], &["*"]);
+        assert!(l.is_allowed("api.evil.com"));
     }
 
     #[test]

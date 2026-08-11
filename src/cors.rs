@@ -125,9 +125,8 @@ pub async fn cors_layer(mut req: Request, next: Next) -> Response {
 
 /// `OPTIONS /*target` preflight handler.
 ///
-/// Returns `204 No Content` with CORS headers. The target URL is not
-/// validated here — preflight only needs to satisfy the browser's CORS
-/// check before the actual GET is issued.
+/// Returns `204 No Content` with CORS headers after validating the target and
+/// requesting-origin policies, including blacklist/whitelist precedence.
 pub async fn preflight_handler(
     State(state): State<Arc<AppState>>,
     OriginalUri(uri): OriginalUri,

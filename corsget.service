@@ -29,7 +29,7 @@ Group=corsget
 WorkingDirectory=/etc/corsget
 
 # Set the default config explicitly because corsget's implicit default is
-# config.yaml beside the executable, not in WorkingDirectory.
+# config.yml beside the executable, not in WorkingDirectory.
 # Clone the template from GitHub and update for your needs:
 # https://github.com/codynhanpham/corsget/blob/main/config.example.yml
 Environment=CORSGET_CONFIG=/etc/corsget/config.yml
@@ -58,6 +58,9 @@ ProtectHome=true
 # restrictions and add only the required directories with ReadOnlyPaths= or
 # ReadWritePaths= instead of disabling the sandbox.
 ; ReadWritePaths=/etc/corsget
+# If caching is enabled, create this directory, make it writable by the
+# service account, set cache.location to /var/cache/corsget, and uncomment:
+; ReadWritePaths=/var/cache/corsget
 
 [Install]
 WantedBy=multi-user.target

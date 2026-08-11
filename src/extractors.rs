@@ -184,6 +184,7 @@ mod tests {
                 max_redirects: 0,
                 timeout: 30,
             },
+            cache: crate::config::CacheConfig::default(),
         };
         let request = Request::builder()
             .header("X-Real-IP", "not-an-ip")

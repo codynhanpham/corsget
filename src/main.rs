@@ -16,6 +16,7 @@ use futures::future::try_join_all;
 use local_ip_address::list_afinet_netifas;
 use tower::ServiceBuilder;
 
+mod cache;
 mod config;
 mod cors;
 mod error;
@@ -32,7 +33,7 @@ use crate::state::AppState;
 
 /// Name of the config file created beside the executable when no config path
 /// is provided.
-const DEFAULT_CONFIG_FILENAME: &str = "config.yaml";
+const DEFAULT_CONFIG_FILENAME: &str = "config.yml";
 
 /// The annotated config shipped with the application and used for the first
 /// launch. Embedding it keeps the generated config available in release
@@ -49,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // Load config: CLI arg > env var > config.yaml beside the executable.
+    // Load config: CLI arg > env var > config.yml beside the executable.
     // Only the implicit default path gets an automatic config file; an
     // explicitly supplied path must fail rather than being overwritten.
     let cli_config_path = std::env::args().nth(1);
@@ -87,6 +88,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    if !config.application.real_ip_header.trim().is_empty()
+        && config
+            .application
+            .host
+            .iter()
+            .any(|host| host == "0.0.0.0" || host == "[::]" || host == "::")
+    {
+        tracing::warn!(
+            header = %config.application.real_ip_header,
+            "real IP header is trusted on wildcard binds; ensure only a trusted reverse proxy can reach this service"
+        );
+    }
+
     let addrs: Vec<SocketAddr> = config
         .application
         .host
@@ -100,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let hostname = config.application.hostname.clone();
     let port = config.application.port;
-    let state = Arc::new(AppState::new(config)?);
+    let state = Arc::new(AppState::new(config, &config_path)?);
 
     // Build the router.
     //
@@ -111,7 +125,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   CORS headers.
     let app = Router::new()
         .route("/", any(root_not_found))
-        .route("/{*target}", get(proxy_handler).options(preflight_handler))
+        .route(
+            "/{*target}",
+            get(proxy_handler)
+                .options(preflight_handler)
+                .fallback(method_not_allowed),
+        )
         .layer(ServiceBuilder::new().layer(from_fn(cors_layer)))
         .with_state(state);
 
@@ -186,6 +205,14 @@ async fn root_not_found() -> impl axum::response::IntoResponse {
     (
         axum::http::StatusCode::NOT_FOUND,
         axum::Json(serde_json::json!({ "error": "not found" })),
+    )
+}
+
+/// Return application-shaped JSON for methods that are not supported.
+async fn method_not_allowed() -> impl axum::response::IntoResponse {
+    (
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(serde_json::json!({ "error": "method not allowed" })),
     )
 }
 
