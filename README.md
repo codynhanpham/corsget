@@ -125,6 +125,12 @@ are never overwritten. Unknown keys are rejected (strict parsing) to catch
 typos. See [`config.example.yml`](config.example.yml) for a full annotated
 example.
 
+On startup the resolved config path is logged, followed by the cache state:
+whether caching is enabled, the resolved cache directory, and, when disabled,
+the reason (for example `cache.enabled is false`, a zero `max_age`/`max_size`,
+an empty whitelist, or an unavailable cache directory). When caching is
+enabled, any startup cleanup of persisted entries is also reported.
+
 ### `application`
 
 | Field           | Type   | Default   | Description                                               |
@@ -290,6 +296,16 @@ proxy continues with caching disabled. The size limit includes cached body
 and metadata files; entries larger than the total limit are served but are
 not stored. Least-recently-used entries are removed when the limit is
 exceeded.
+
+Cache entries persist across application restarts. `created_at` and
+`last_access` are stored in each entry's metadata, so a cached response's age
+and its LRU position survive a restart. On startup, the cache is cleaned
+before the first request is served: stale entries (whose persisted age has
+reached their stored TTL), invalid or incomplete entries, orphaned body
+files, and leftover temporary files are removed, and the current `max_size`
+is enforced using the persisted `last_access` order. Changing the cache
+`whitelist` does not delete existing entries; it only affects which targets
+are cached from that point on.
 
 Only successful `2xx` responses are cached. `Cache-Control` and `Expires` are
 honored, with the configured age acting as an upper bound. Responses marked

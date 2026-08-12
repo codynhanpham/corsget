@@ -3,7 +3,7 @@
 use axum_limit::LimitState;
 use std::path::Path;
 
-use crate::cache::Cache;
+use crate::cache::{Cache, CacheStatus};
 use crate::config::Config;
 use crate::extractors::RateLimitKey;
 use crate::limit::BandwidthLimiter;
@@ -27,6 +27,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Optional persistent response cache.
     pub cache: Option<Cache>,
+    /// Cache initialization status for the startup summary.
+    pub cache_status: CacheStatus,
 }
 
 impl AppState {
@@ -42,7 +44,9 @@ impl AppState {
 
         let limit_state = LimitState::<RateLimitKey>::default();
         let bandwidth = BandwidthLimiter::new(&config.connection.bandwidth_limit.connection);
-        let cache = Cache::new(&config.cache, config_path);
+        let cache_initialization = Cache::initialize(&config.cache, config_path);
+        let cache = cache_initialization.cache;
+        let cache_status = cache_initialization.status;
 
         let http_client = reqwest::Client::builder()
             // We handle redirects manually so the Authorization header
@@ -64,6 +68,7 @@ impl AppState {
             bandwidth,
             http_client,
             cache,
+            cache_status,
         })
     }
 }

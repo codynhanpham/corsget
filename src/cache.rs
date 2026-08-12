@@ -5,6 +5,7 @@
 //! incomplete responses are ignored on restart.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +36,59 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone)]
 pub struct Cache {
     inner: Arc<CacheInner>,
+}
+
+/// Results collected while cleaning the persistent cache during startup.
+#[derive(Debug, Clone, Default)]
+pub struct CacheCleanupSummary {
+    pub stale_entries: u64,
+    pub invalid_entries: u64,
+    pub orphaned_files: u64,
+    pub temporary_files: u64,
+    pub lru_evictions: u64,
+    pub bytes_removed: u64,
+    pub errors: u64,
+}
+
+/// Why cache initialization did not produce an active cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheDisabledReason {
+    DisabledByConfig,
+    ZeroMaxAge,
+    ZeroMaxSize,
+    EmptyWhitelist,
+    CacheDirectoryUnavailable,
+    NoValidWhitelistRules,
+}
+
+impl fmt::Display for CacheDisabledReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self {
+            Self::DisabledByConfig => "cache.enabled is false",
+            Self::ZeroMaxAge => "cache.max_age is zero",
+            Self::ZeroMaxSize => "cache.max_size is zero",
+            Self::EmptyWhitelist => "cache.whitelist is empty",
+            Self::CacheDirectoryUnavailable => "cache directory could not be created",
+            Self::NoValidWhitelistRules => "cache.whitelist has no valid rules",
+        };
+        formatter.write_str(reason)
+    }
+}
+
+/// Cache state reported in the startup summary.
+#[derive(Debug, Clone)]
+pub struct CacheStatus {
+    pub enabled: bool,
+    pub location: PathBuf,
+    pub disabled_reason: Option<CacheDisabledReason>,
+    pub cleanup: CacheCleanupSummary,
+}
+
+/// Result of initializing and cleaning the persistent cache.
+#[derive(Debug)]
+pub struct CacheInitialization {
+    pub cache: Option<Cache>,
+    pub status: CacheStatus,
 }
 
 #[derive(Debug)]
@@ -94,15 +148,8 @@ pub struct CacheWriter {
 }
 
 impl Cache {
-    /// Create an active cache. Directory setup failure disables caching.
-    pub fn new(config: &CacheConfig, config_path: &Path) -> Option<Self> {
-        if !config.enabled
-            || config.max_age == 0
-            || config.max_size == 0
-            || config.whitelist.is_empty()
-        {
-            return None;
-        }
+    /// Initialize and clean an on-disk cache.
+    pub fn initialize(config: &CacheConfig, config_path: &Path) -> CacheInitialization {
         let base = config_path.parent().unwrap_or_else(|| Path::new("."));
         let root = if config.location.trim().is_empty() {
             base.join(".cache")
@@ -114,9 +161,33 @@ impl Cache {
                 base.join(path)
             }
         };
+
+        let disabled = |reason| CacheInitialization {
+            cache: None,
+            status: CacheStatus {
+                enabled: false,
+                location: root.clone(),
+                disabled_reason: Some(reason),
+                cleanup: CacheCleanupSummary::default(),
+            },
+        };
+
+        if !config.enabled {
+            return disabled(CacheDisabledReason::DisabledByConfig);
+        }
+        if config.max_age == 0 {
+            return disabled(CacheDisabledReason::ZeroMaxAge);
+        }
+        if config.max_size == 0 {
+            return disabled(CacheDisabledReason::ZeroMaxSize);
+        }
+        if config.whitelist.is_empty() {
+            return disabled(CacheDisabledReason::EmptyWhitelist);
+        }
+
         if let Err(error) = std::fs::create_dir_all(&root) {
             tracing::warn!(path = %root.display(), %error, "cache disabled: cannot create cache directory");
-            return None;
+            return disabled(CacheDisabledReason::CacheDirectoryUnavailable);
         }
         let mut rules = Vec::new();
         for rule in &config.whitelist {
@@ -129,16 +200,27 @@ impl Cache {
         }
         if rules.is_empty() {
             tracing::warn!("cache disabled: no valid cache whitelist rules");
-            return None;
+            return disabled(CacheDisabledReason::NoValidWhitelistRules);
         }
-        Some(Self {
+
+        let cache = Self {
             inner: Arc::new(CacheInner {
-                root,
+                root: root.clone(),
                 max_size: config.max_size,
                 default_max_age: config.max_age,
                 rules,
             }),
-        })
+        };
+        let cleanup = cache.cleanup_startup();
+        CacheInitialization {
+            cache: Some(cache),
+            status: CacheStatus {
+                enabled: true,
+                location: root,
+                disabled_reason: None,
+                cleanup,
+            },
+        }
     }
 
     /// Return a cache plan for a safe request matching the last whitelist rule.
@@ -332,6 +414,126 @@ impl Cache {
         let data = serde_json::to_vec(entry).map_err(std::io::Error::other)?;
         fs::write(&temp, data).await?;
         fs::rename(temp, path).await
+    }
+
+    /// Remove stale and incomplete entries, then enforce the current size
+    /// limit before the first request is served after a restart.
+    fn cleanup_startup(&self) -> CacheCleanupSummary {
+        let mut summary = CacheCleanupSummary::default();
+        let now = now_seconds();
+        let mut valid_keys = HashSet::new();
+        let mut entries = Vec::new();
+        let mut total = 0u64;
+
+        let directory = match std::fs::read_dir(&self.inner.root) {
+            Ok(directory) => directory,
+            Err(error) => {
+                summary.errors += 1;
+                tracing::warn!(path = %self.inner.root.display(), %error, "cache startup cleanup could not scan cache directory");
+                return summary;
+            }
+        };
+
+        for item in directory {
+            let Ok(item) = item else {
+                summary.errors += 1;
+                tracing::warn!(path = %self.inner.root.display(), "cache startup cleanup could not read a directory entry");
+                continue;
+            };
+            let path = item.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if is_cache_temp_file(name) {
+                summary.bytes_removed += remove_cache_file(&path, &mut summary);
+                summary.temporary_files += 1;
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+
+            let Some(key) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                summary.invalid_entries += 1;
+                summary.bytes_removed += remove_cache_file(&path, &mut summary);
+                continue;
+            };
+            let body_path = self.body_path(key);
+            let metadata_size = std::fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let entry: CacheEntry = match std::fs::read(&path)
+                .ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+            {
+                Some(entry) => entry,
+                None => {
+                    summary.invalid_entries += 1;
+                    summary.bytes_removed += remove_cache_file(&path, &mut summary);
+                    continue;
+                }
+            };
+
+            let body_size = match std::fs::metadata(&body_path) {
+                Ok(metadata) if metadata.len() == entry.body_len => metadata.len(),
+                _ => {
+                    summary.invalid_entries += 1;
+                    summary.bytes_removed += remove_cache_file(&path, &mut summary);
+                    summary.bytes_removed += remove_cache_file(&body_path, &mut summary);
+                    continue;
+                }
+            };
+
+            if entry.version != CACHE_VERSION
+                || entry.revalidate
+                || now.saturating_sub(entry.created_at) >= entry.ttl
+            {
+                summary.stale_entries += 1;
+                summary.bytes_removed += remove_cache_file(&path, &mut summary);
+                summary.bytes_removed += remove_cache_file(&body_path, &mut summary);
+                continue;
+            }
+
+            valid_keys.insert(key.to_string());
+            let size = metadata_size.saturating_add(body_size);
+            total = total.saturating_add(size);
+            entries.push((entry.last_access, key.to_string(), size));
+        }
+
+        // Remove body files that no longer have a valid metadata entry. This
+        // also cleans bodies left behind by interrupted or failed writes.
+        if let Ok(directory) = std::fs::read_dir(&self.inner.root) {
+            for item in directory.flatten() {
+                let path = item.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("body") {
+                    continue;
+                }
+                let Some(key) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                if !valid_keys.contains(key) {
+                    summary.orphaned_files += 1;
+                    summary.bytes_removed += remove_cache_file(&path, &mut summary);
+                }
+            }
+        } else {
+            summary.errors += 1;
+            tracing::warn!(path = %self.inner.root.display(), "cache startup cleanup could not rescan cache directory");
+        }
+
+        entries.sort_by_key(|(last_access, _, _)| *last_access);
+        for (_, key, size) in entries {
+            if total <= self.inner.max_size {
+                break;
+            }
+            summary.lru_evictions += 1;
+            summary.bytes_removed += remove_cache_file(&self.meta_path(&key), &mut summary);
+            summary.bytes_removed += remove_cache_file(&self.body_path(&key), &mut summary);
+            total = total.saturating_sub(size);
+        }
+
+        summary
     }
 
     async fn evict(&self) {
@@ -574,6 +776,26 @@ fn now_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether a cache directory entry is a temporary body or metadata file.
+fn is_cache_temp_file(name: &str) -> bool {
+    name.contains(".tmp-")
+}
+
+/// Best-effort removal of a cache file, counting failures in the summary.
+fn remove_cache_file(path: &Path, summary: &mut CacheCleanupSummary) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(metadata) => match std::fs::remove_file(path) {
+            Ok(()) => metadata.len(),
+            Err(error) => {
+                summary.errors += 1;
+                tracing::warn!(path = %path.display(), %error, "cache startup cleanup could not remove file");
+                0
+            }
+        },
+        Err(_) => 0,
+    }
+}
+
 fn cacheable_headers(headers: &HeaderMap) -> bool {
     let Some(cache_control) = headers
         .get(header::CACHE_CONTROL)
@@ -751,7 +973,9 @@ mod tests {
             },
         ]);
         cfg.location = root.to_string_lossy().to_string();
-        let cache = Cache::new(&cfg, Path::new("config.yml")).unwrap();
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
         let headers = HeaderMap::new();
         let public = Url::parse("https://example.com/public").unwrap();
         let private = Url::parse("https://example.com/private/value").unwrap();
@@ -769,7 +993,9 @@ mod tests {
             max_age: 10,
         }]);
         cfg.location = root.to_string_lossy().to_string();
-        let cache = Cache::new(&cfg, Path::new("config.yml")).unwrap();
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
         let url = Url::parse("https://example.com/").unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -855,7 +1081,9 @@ mod tests {
             max_age: 10,
         }]);
         cfg.location = root.to_string_lossy().to_string();
-        let cache = Cache::new(&cfg, Path::new("config.yml")).unwrap();
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
         let url = Url::parse("https://example.com/public").unwrap();
         let request_headers = HeaderMap::new();
         let plan = cache.plan(&url, &request_headers).unwrap();
@@ -890,7 +1118,9 @@ mod tests {
             max_age: 10,
         }]);
         cfg.location = root.to_string_lossy().to_string();
-        let cache = Cache::new(&cfg, Path::new("config.yml")).unwrap();
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
         let url = Url::parse("https://example.com/private").unwrap();
         let request_headers = HeaderMap::new();
         let plan = cache.plan(&url, &request_headers).unwrap();
@@ -966,5 +1196,267 @@ mod tests {
             HeaderValue::from_static("max-age=0, must-revalidate"),
         );
         assert!(!request_requires_revalidation(&headers));
+    }
+
+    #[test]
+    fn disabled_reasons_are_reported() {
+        let root =
+            std::env::temp_dir().join(format!("corsget-cache-disabled-{}", std::process::id()));
+        let mut cfg = config(vec![CacheRule {
+            pattern: "example.com/*".to_string(),
+            max_age: 10,
+        }]);
+        cfg.location = root.to_string_lossy().to_string();
+
+        let mut disabled = cfg.clone();
+        disabled.enabled = false;
+        let init = Cache::initialize(&disabled, Path::new("config.yml"));
+        assert!(init.cache.is_none());
+        assert_eq!(
+            init.status.disabled_reason,
+            Some(CacheDisabledReason::DisabledByConfig)
+        );
+
+        let mut zero_age = cfg.clone();
+        zero_age.max_age = 0;
+        let init = Cache::initialize(&zero_age, Path::new("config.yml"));
+        assert_eq!(
+            init.status.disabled_reason,
+            Some(CacheDisabledReason::ZeroMaxAge)
+        );
+
+        let mut zero_size = cfg.clone();
+        zero_size.max_size = 0;
+        let init = Cache::initialize(&zero_size, Path::new("config.yml"));
+        assert_eq!(
+            init.status.disabled_reason,
+            Some(CacheDisabledReason::ZeroMaxSize)
+        );
+
+        let mut empty = cfg.clone();
+        empty.whitelist.clear();
+        let init = Cache::initialize(&empty, Path::new("config.yml"));
+        assert_eq!(
+            init.status.disabled_reason,
+            Some(CacheDisabledReason::EmptyWhitelist)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolved_location_is_reported() {
+        let root =
+            std::env::temp_dir().join(format!("corsget-cache-location-{}", std::process::id()));
+        let mut cfg = config(vec![CacheRule {
+            pattern: "example.com/*".to_string(),
+            max_age: 10,
+        }]);
+        cfg.location = root.to_string_lossy().to_string();
+        let init = Cache::initialize(&cfg, Path::new("config.yml"));
+        assert!(init.cache.is_some());
+        assert_eq!(init.status.location, root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn entry_survives_reconstruction() {
+        let root =
+            std::env::temp_dir().join(format!("corsget-cache-reconstruct-{}", std::process::id()));
+        let mut cfg = config(vec![CacheRule {
+            pattern: "example.com/*".to_string(),
+            max_age: 900,
+        }]);
+        cfg.location = root.to_string_lossy().to_string();
+
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
+        let url = Url::parse("https://example.com/data").unwrap();
+        let request_headers = HeaderMap::new();
+        let plan = cache.plan(&url, &request_headers).unwrap();
+        let mut writer = cache
+            .begin_write(plan.clone(), 200, &HeaderMap::new(), &request_headers)
+            .await
+            .unwrap();
+        writer.write(b"persisted").await.unwrap();
+        writer.finish().await.unwrap();
+
+        // Simulate a restart: construct a fresh cache over the same directory.
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
+        let entry = cache.lookup(&plan, now()).await.unwrap();
+        assert_eq!(entry.body_len, 9);
+        assert!(Cache::is_fresh(&entry, now()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stale_entry_is_removed_on_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "corsget-cache-stale-restart-{}",
+            std::process::id()
+        ));
+        let mut cfg = config(vec![CacheRule {
+            pattern: "example.com/*".to_string(),
+            max_age: 10,
+        }]);
+        cfg.location = root.to_string_lossy().to_string();
+
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
+        let url = Url::parse("https://example.com/data").unwrap();
+        let request_headers = HeaderMap::new();
+        let plan = cache.plan(&url, &request_headers).unwrap();
+        let mut writer = cache
+            .begin_write(plan.clone(), 200, &HeaderMap::new(), &request_headers)
+            .await
+            .unwrap();
+        writer.write(b"data").await.unwrap();
+        writer.finish().await.unwrap();
+
+        // Rewrite the persisted metadata so the entry is already stale.
+        let meta_path = cache.meta_path(&plan.key);
+        let mut entry: CacheEntry =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        entry.created_at = now().saturating_sub(100);
+        entry.ttl = 10;
+        std::fs::write(&meta_path, serde_json::to_vec(&entry).unwrap()).unwrap();
+
+        let init = Cache::initialize(&cfg, Path::new("config.yml"));
+        assert!(init.cache.is_some());
+        assert_eq!(init.status.cleanup.stale_entries, 1);
+        assert!(!meta_path.exists());
+        assert!(!cache.body_path(&plan.key).exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn invalid_and_orphaned_files_are_removed_on_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "corsget-cache-invalid-restart-{}",
+            std::process::id()
+        ));
+        let mut cfg = config(vec![CacheRule {
+            pattern: "example.com/*".to_string(),
+            max_age: 900,
+        }]);
+        cfg.location = root.to_string_lossy().to_string();
+
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
+        let url = Url::parse("https://example.com/data").unwrap();
+        let request_headers = HeaderMap::new();
+        let plan = cache.plan(&url, &request_headers).unwrap();
+        let mut writer = cache
+            .begin_write(plan.clone(), 200, &HeaderMap::new(), &request_headers)
+            .await
+            .unwrap();
+        writer.write(b"data").await.unwrap();
+        writer.finish().await.unwrap();
+
+        // Corrupt the metadata.
+        let meta_path = cache.meta_path(&plan.key);
+        std::fs::write(&meta_path, b"not json").unwrap();
+        // Add an orphaned body and a temporary file.
+        let orphan = root.join("orphan.body");
+        std::fs::write(&orphan, b"orphan").unwrap();
+        let temp = root.join(".tmp-file");
+        std::fs::write(&temp, b"temp").unwrap();
+
+        let init = Cache::initialize(&cfg, Path::new("config.yml"));
+        assert!(init.cache.is_some());
+        assert_eq!(init.status.cleanup.invalid_entries, 1);
+        // The corrupt entry's body is orphaned alongside the explicit one.
+        assert_eq!(init.status.cleanup.orphaned_files, 2);
+        assert_eq!(init.status.cleanup.temporary_files, 1);
+        assert!(!meta_path.exists());
+        assert!(!orphan.exists());
+        assert!(!temp.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn startup_enforces_size_limit_by_lru() {
+        let root =
+            std::env::temp_dir().join(format!("corsget-cache-lru-restart-{}", std::process::id()));
+        let mut cfg = config(vec![CacheRule {
+            pattern: "example.com/*".to_string(),
+            max_age: 900,
+        }]);
+        cfg.location = root.to_string_lossy().to_string();
+
+        // Write entries with a generous limit so they all survive commit-time
+        // eviction, then restart with a small limit to force startup eviction.
+        let mut write_cfg = cfg.clone();
+        write_cfg.max_size = 1024 * 1024;
+        let cache = Cache::initialize(&write_cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
+        let request_headers = HeaderMap::new();
+        for (i, path) in ["a", "b", "c"].iter().enumerate() {
+            let url = Url::parse(&format!("https://example.com/{path}")).unwrap();
+            let plan = cache.plan(&url, &request_headers).unwrap();
+            let mut writer = cache
+                .begin_write(plan.clone(), 200, &HeaderMap::new(), &request_headers)
+                .await
+                .unwrap();
+            writer.write(format!("data-{i}").as_bytes()).await.unwrap();
+            writer.finish().await.unwrap();
+        }
+
+        // Simulate a restart with a small size limit.
+        cfg.max_size = 100;
+        let init = Cache::initialize(&cfg, Path::new("config.yml"));
+        assert!(init.cache.is_some());
+        assert!(init.status.cleanup.lru_evictions > 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn whitelist_change_does_not_delete_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "corsget-cache-whitelist-restart-{}",
+            std::process::id()
+        ));
+        let mut cfg = config(vec![CacheRule {
+            pattern: "example.com/*".to_string(),
+            max_age: 900,
+        }]);
+        cfg.location = root.to_string_lossy().to_string();
+
+        let cache = Cache::initialize(&cfg, Path::new("config.yml"))
+            .cache
+            .unwrap();
+        let url = Url::parse("https://example.com/data").unwrap();
+        let request_headers = HeaderMap::new();
+        let plan = cache.plan(&url, &request_headers).unwrap();
+        let mut writer = cache
+            .begin_write(plan.clone(), 200, &HeaderMap::new(), &request_headers)
+            .await
+            .unwrap();
+        writer.write(b"data").await.unwrap();
+        writer.finish().await.unwrap();
+
+        // Restart with a different whitelist; the entry must survive.
+        let mut changed = cfg.clone();
+        changed.whitelist = vec![CacheRule {
+            pattern: "other.example.com/*".to_string(),
+            max_age: 900,
+        }];
+        let init = Cache::initialize(&changed, Path::new("config.yml"));
+        assert!(init.cache.is_some());
+        assert_eq!(init.status.cleanup.stale_entries, 0);
+        assert_eq!(init.status.cleanup.invalid_entries, 0);
+        assert!(cache.meta_path(&plan.key).exists());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

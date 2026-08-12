@@ -115,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hostname = config.application.hostname.clone();
     let port = config.application.port;
     let state = Arc::new(AppState::new(config, &config_path)?);
+    log_startup_summary(&config_path, &state);
 
     // Build the router.
     //
@@ -157,6 +158,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+/// Log the resolved configuration and cache state once at startup.
+fn log_startup_summary(config_path: &std::path::Path, state: &AppState) {
+    tracing::info!(path = %config_path.display(), "using config file");
+    let status = &state.cache_status;
+    if status.enabled {
+        tracing::info!(
+            location = %status.location.display(),
+            "cache enabled"
+        );
+        let cleanup = &status.cleanup;
+        if cleanup.stale_entries > 0
+            || cleanup.invalid_entries > 0
+            || cleanup.orphaned_files > 0
+            || cleanup.temporary_files > 0
+            || cleanup.lru_evictions > 0
+        {
+            tracing::info!(
+                stale = cleanup.stale_entries,
+                invalid = cleanup.invalid_entries,
+                orphaned = cleanup.orphaned_files,
+                temporary = cleanup.temporary_files,
+                lru_evicted = cleanup.lru_evictions,
+                bytes_removed = cleanup.bytes_removed,
+                "cache startup cleanup removed persisted entries"
+            );
+        }
+    } else {
+        let reason = status
+            .disabled_reason
+            .map(|reason| reason.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        tracing::info!(
+            location = %status.location.display(),
+            reason = %reason,
+            "cache disabled"
+        );
+    }
 }
 
 /// Return useful addresses for the startup message without confusing a
