@@ -21,6 +21,7 @@ connection:
     # If the whitelist is non-empty, entries matching neither list are denied.
     # If both are empty, all targets will be allowed.
     # Format: exact, wildcard, or regex matches
+    # A null value or a list containing only `-` means an empty list.
     blacklist:
       - #
     whitelist:
@@ -32,6 +33,7 @@ connection:
     # If the whitelist is non-empty, entries matching neither list are denied.
     # If both are empty, all origins will be allowed.
     # Format: exact, wildcard, or regex matches
+    # A null value or a list containing only `-` means an empty list.
     blacklist:
       - #
     whitelist:
@@ -48,6 +50,7 @@ connection:
     ## Rate limit configuration ##
     # The rate limit is applied per requester origin per client IP address.
     # All limit tiers applies
+    # A null value or a list containing only `-` means no rate limits.
     - window: 1 # seconds
       max: 5 # requests
     - window: 60
@@ -58,6 +61,7 @@ connection:
     connection:
       # Maximum number of bytes per window per requester origin per client IP address.
       # All limit tiers applies
+      # A null value or a list containing only `-` means no connection limit.
       - window: 60 # seconds
         max: 1024 * 1024 * 4096 # bytes == 4 GiB
 
@@ -97,7 +101,7 @@ cache:
   # If the directory is not writable, caching will be disabled with a warning.
   location: ".cache"
 
-  whitelist: []
+  whitelist:
     # Specific targets or requests can set max_age up to the global max_age.
     # Format: exact, wildcard, or regex matches
     # Example:
@@ -109,5 +113,4 @@ cache:
     # - match: "*"
     #   max_age: 60 * 15 # seconds == 15 minutes
 
-    # - match: "raw.githubusercontent.com/*"
-    #   max_age: 60 * 20 # seconds == 20 minutes
+    - #

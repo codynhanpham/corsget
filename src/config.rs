@@ -102,7 +102,7 @@ pub struct ConnectionConfig {
     /// Requesting-origin allow/deny lists.
     pub origin: TargetListConfig,
     /// Per-(origin, ip) request-count rate limits (all tiers apply).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_vec")]
     pub rate_limit: Vec<LimitTier>,
     /// Per-(origin, ip) byte bandwidth limits.
     #[serde(default)]
@@ -115,49 +115,61 @@ pub struct ConnectionConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetListConfig {
-    /// Denied entries (exact / wildcard / regex). `null` entries (e.g. from
-    /// `- #` comment-only YAML list items) are filtered out.
+    /// Denied entries (exact / wildcard / regex). A null value, or null
+    /// entries such as `- #` comment-only YAML list items, means empty.
     #[serde(default, deserialize_with = "deserialize_non_empty_strings")]
     pub blacklist: Vec<String>,
-    /// Allowed entries (exact / wildcard / regex). A matching entry overrides
-    /// the blacklist; a non-matching entry is denied when this list is non-empty.
+    /// Allowed entries (exact / wildcard / regex). A null value, or null
+    /// entries such as `- #` comment-only YAML list items, means empty. A
+    /// matching entry overrides the blacklist; a non-matching entry is denied
+    /// when this list is non-empty.
     #[serde(default, deserialize_with = "deserialize_non_empty_strings")]
     pub whitelist: Vec<String>,
 }
 
-/// Deserialize a `Vec<String>`, dropping `null` and empty/whitespace-only
-/// entries. This handles YAML patterns like `- # comment` which parse as
-/// a list containing `null`.
+/// Deserialize a nullable sequence, treating both a null value and null
+/// sequence entries as absent. This supports concise YAML such as
+/// `rate_limit: #` and `rate_limit:\n  -`.
+fn deserialize_optional_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NullableVec<T> {
+        Null,
+        Values(Vec<Option<T>>),
+    }
+
+    match NullableVec::deserialize(deserializer)? {
+        NullableVec::Null => Ok(Vec::new()),
+        NullableVec::Values(values) => Ok(values.into_iter().flatten().collect()),
+    }
+}
+
+/// Deserialize a nullable `Vec<String>`, dropping null and
+/// empty/whitespace-only entries. This handles YAML patterns like
+/// `whitelist: #` and `- #` comment-only list items.
 fn deserialize_non_empty_strings<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    use serde::Deserialize;
-
-    /// A list element that may be a string or null. Using `untagged` lets
-    /// serde try `Str` first (for plain string items) then fall back to
-    /// `Null` (for `- # comment` items that parse as YAML null).
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum MaybeString {
-        Str(String),
+    enum NullableStrings {
         Null,
+        Values(Vec<Option<String>>),
     }
 
-    impl MaybeString {
-        fn into_option(self) -> Option<String> {
-            match self {
-                MaybeString::Str(s) if !s.trim().is_empty() => Some(s),
-                _ => None,
-            }
-        }
+    match NullableStrings::deserialize(deserializer)? {
+        NullableStrings::Null => Ok(Vec::new()),
+        NullableStrings::Values(values) => Ok(values
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())
+            .collect()),
     }
-
-    let raw: Vec<MaybeString> = Vec::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .filter_map(MaybeString::into_option)
-        .collect())
 }
 
 /// Deserialize a byte count that may be either a plain integer or a string
@@ -235,7 +247,7 @@ where
 #[serde(deny_unknown_fields)]
 pub struct BandwidthLimitConfig {
     /// Per-(origin, ip) connection bandwidth tiers (all tiers apply).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_vec")]
     pub connection: Vec<LimitTier>,
     /// Per-result (single proxied response) byte cap.
     #[serde(default)]
@@ -293,7 +305,7 @@ pub struct CacheConfig {
     #[serde(default)]
     pub location: String,
     /// Whitelist rules that enable caching for matching target URLs.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_vec")]
     pub whitelist: Vec<CacheRule>,
 }
 
@@ -455,6 +467,42 @@ proxy: { max_redirects: 10, timeout: 30 }
         let cfg = Config::load(&tmp).unwrap();
         assert!(!cfg.cache.enabled);
         assert!(cfg.cache.whitelist.is_empty());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn nullable_lists_are_treated_as_empty() {
+        let yaml = "
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection:
+    target:
+        blacklist: # no denied targets
+        whitelist:
+            - # no allowed targets
+    origin:
+        blacklist: # no denied origins
+        whitelist:
+    rate_limit: # no request limits
+    bandwidth_limit:
+        connection:
+            - # no connection bandwidth limits
+        result: {}
+proxy: { max_redirects: 10, timeout: 30 }
+cache:
+    whitelist:
+";
+        let tmp = std::env::temp_dir().join("corsget_test_nullable_lists.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let cfg = Config::load(&tmp).unwrap();
+
+        assert!(cfg.connection.target.blacklist.is_empty());
+        assert!(cfg.connection.target.whitelist.is_empty());
+        assert!(cfg.connection.origin.blacklist.is_empty());
+        assert!(cfg.connection.origin.whitelist.is_empty());
+        assert!(cfg.connection.rate_limit.is_empty());
+        assert!(cfg.connection.bandwidth_limit.connection.is_empty());
+        assert!(cfg.cache.whitelist.is_empty());
+
         let _ = std::fs::remove_file(&tmp);
     }
 

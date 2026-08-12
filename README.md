@@ -149,8 +149,8 @@ a valid `Origin` or `Referer` are also denied when the whitelist is non-empty.
 
 | Field        | Type         | Description                                           |
 |--------------|--------------|-------------------------------------------------------|
-| `blacklist`  | list[string] | Denied entries, evaluated before the whitelist.       |
-| `whitelist`  | list[string] | Allowed entries; a match overrides the blacklist.    |
+| `blacklist`  | list[string] or null | Denied entries, evaluated before the whitelist. A null value means empty. |
+| `whitelist`  | list[string] or null | Allowed entries; a match overrides the blacklist. A null value means empty. |
 
 **Entry formats** (auto-detected):
 
@@ -171,6 +171,10 @@ addresses with octets from `0` to `255`.
 Per-(requesting-origin, client-IP) request-count limits. All tiers apply
 simultaneously; the first to fail returns `429 Too Many Requests` with
 `Retry-After` and `X-RateLimit-*` headers.
+
+The list may be omitted or set to null when no request-count limits are needed.
+Null list items are ignored, so `rate_limit: #` and a list containing only
+`-` are equivalent to `rate_limit: []`.
 
 ```yaml
 rate_limit:
@@ -194,6 +198,9 @@ bandwidth_limit:
   result: # hard cap on a single response body
     max: 1024 * 1024 * 512 # 512 MiB
 ```
+
+`bandwidth_limit.connection` may likewise be omitted or set to null when no
+connection bandwidth tiers are needed. Null list items are ignored.
 
 If a response's `Content-Length` exceeds `result.max`, it is rejected with
 `413 Payload Too Large` before streaming begins. Otherwise, bytes are counted
