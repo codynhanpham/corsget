@@ -887,6 +887,7 @@ fn cache_headers(headers: &HeaderMap) -> Vec<(String, String)> {
         .filter_map(|(name, value)| {
             if name.as_str() == CACHE_DIAGNOSTIC_HEADER
                 || crate::cors::is_hop_by_hop(name.as_str())
+                || crate::cors::is_cors_response_header(name.as_str())
                 || name == header::CONNECTION
             {
                 return None;
@@ -905,7 +906,8 @@ pub fn headers_from_entry(entry: &CacheEntry) -> HeaderMap {
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(value),
-        ) {
+        ) && !crate::cors::is_cors_response_header(name.as_str())
+        {
             headers.append(name, value);
         }
     }

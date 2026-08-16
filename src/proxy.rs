@@ -167,6 +167,7 @@ fn copy_response_headers(source: &HeaderMap, body_may_be_truncated: bool) -> Hea
         .collect();
     for (name, value) in source.iter() {
         if crate::cors::is_hop_by_hop(name.as_str())
+            || crate::cors::is_cors_response_header(name.as_str())
             || connection_headers
                 .iter()
                 .any(|header| header == name.as_str())
@@ -621,6 +622,26 @@ mod tests {
             out.get(header::VARY).unwrap(),
             "Authorization, Accept-Encoding"
         );
+    }
+
+    #[test]
+    fn response_headers_remove_upstream_cors_headers() {
+        let mut source = HeaderMap::new();
+        source.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("https://proxy.example"),
+        );
+        source.insert(
+            header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+            HeaderValue::from_static("false"),
+        );
+        source.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+
+        let out = copy_response_headers(&source, false);
+
+        assert!(!out.contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(!out.contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
+        assert!(out.contains_key(header::CONTENT_TYPE));
     }
 
     #[test]

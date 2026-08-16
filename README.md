@@ -262,6 +262,12 @@ Every response carries:
 - `Access-Control-Allow-Methods: GET, OPTIONS`
 - `Access-Control-Max-Age: 86400`
 
+The proxy generates these CORS response headers from the incoming consumer
+request. Any same-named headers returned by the upstream target are removed,
+so an upstream value cannot replace the consumer's `Origin` with the proxy's
+own domain. In a browser request from `https://consumer.example.com`, the response
+therefore contains `Access-Control-Allow-Origin: https://consumer.example.com`.
+
 `OPTIONS` preflight requests return `204 No Content` with these headers,
 which is required for non-simple GETs (e.g. those with `Authorization`) to
 work from a browser. Preflight targets and requesting origins are checked

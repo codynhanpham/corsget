@@ -50,6 +50,16 @@ pub fn is_hop_by_hop(name: &str) -> bool {
     name.starts_with("x-forwarded-") || HOP_BY_HOP_HEADERS.contains(&name.as_str())
 }
 
+/// Returns `true` for CORS response headers generated from the consumer's
+/// request. Upstream values must not be allowed to compete with these values.
+pub fn is_cors_response_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("access-control-allow-origin")
+        || name.eq_ignore_ascii_case("access-control-allow-credentials")
+        || name.eq_ignore_ascii_case("access-control-allow-headers")
+        || name.eq_ignore_ascii_case("access-control-allow-methods")
+        || name.eq_ignore_ascii_case("access-control-max-age")
+}
+
 /// Return header names nominated by the `Connection` header.
 pub fn connection_headers(headers: &HeaderMap) -> impl Iterator<Item = &str> {
     headers
@@ -119,7 +129,11 @@ pub async fn cors_layer(mut req: Request, next: Next) -> Response {
     // Stash for handlers that may want to inspect it.
     req.extensions_mut().insert(cors.clone());
     let mut response = next.run(req).await;
-    response.headers_mut().extend(cors);
+    // Insert rather than append: a target or handler must not leave a second
+    // value that could make the browser select the wrong origin.
+    for (name, value) in &cors {
+        response.headers_mut().insert(name, value.clone());
+    }
     response
 }
 
