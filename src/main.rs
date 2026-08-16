@@ -35,6 +35,9 @@ use crate::state::AppState;
 /// is provided.
 const DEFAULT_CONFIG_FILENAME: &str = "config.yml";
 
+/// Version reported by the binary and in the startup log.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// The annotated config shipped with the application and used for the first
 /// launch. Embedding it keeps the generated config available in release
 /// binaries without requiring a separate file at runtime.
@@ -42,6 +45,11 @@ const DEFAULT_CONFIG_TEMPLATE: &[u8] = include_bytes!("../config.example.yml");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("corsget {VERSION}");
+        return Ok(());
+    }
+
     // Initialise structured logging.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -49,6 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    tracing::info!(version = VERSION, "starting corsget");
 
     // Load config: CLI arg > env var > config.yml beside the executable.
     // Only the implicit default path gets an automatic config file; an

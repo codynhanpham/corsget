@@ -39,6 +39,10 @@ Download the latest release from [GitHub Releases](https://github.com/codynhanph
 curl -i "http://localhost:9647/https://httpbin.org/get"
 ```
 
+Use `--version` or `-V` to print the binary version without starting the
+server. The version is also printed in the startup log whenever the server
+launches.
+
 You can also download the source code and build it yourself with `cargo build --release`.
 
 The server listens on `host:port` from `config.yml` (default
