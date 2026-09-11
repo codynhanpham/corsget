@@ -76,6 +76,32 @@ proxy:
   # Maximum number of seconds to wait for a response from the target server before timing out.
   timeout: 30
 
+  # Config-driven response header overrides. Every rule whose `site` pattern
+  # matches the requested target URL (or its final post-redirect URL) is
+  # applied, in the order the rules appear here. Within a rule, actions are
+  # evaluated in the order: remove_headers, then add_headers, then set_headers.
+  #
+  # `site` accepts the same formats as the target/origin lists: exact,
+  # wildcard (`*`), or regex (`/pattern/flags`). It is matched against the
+  # full target URL, e.g. `*://app.example.com/xyz?p*`.
+  #
+  # Hop-by-hop headers, `Content-Length`, the generated CORS response
+  # headers, and `X-Cache` cannot be overridden; rules touching them are
+  # rejected at startup.
+  #
+  # A null value or a list containing only `-` means no overrides.
+  response_headers_overrides:
+    # Example: make a proxied page embeddable in an iframe on a site that
+    # enforces COEP (Cross-Origin-Embedder-Policy: require-corp).
+    # - site: "*://app.example.com/xyz?p*"
+    #   remove_headers:
+    #     - x-frame-options
+    #   add_headers:
+    #     - Cross-Origin-Resource-Policy: cross-origin
+    #   set_headers:
+    #     - Cross-Origin-Embedder-Policy: require-corp
+    - #
+
 
 # Optional disk cache. It is disabled by default and only explicitly
 # whitelisted targets are cached. Rules match host/path?query; schemes are

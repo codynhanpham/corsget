@@ -231,6 +231,7 @@ preserves the upstream `Content-Length`.
 |----------------|------|------------------------------------------------------|
 | `max_redirects`| u32  | Max redirects to follow (`0` disables).              |
 | `timeout`      | u64  | Upstream request timeout in seconds.                 |
+| `response_headers_overrides` | list or null | Config-driven response header overrides. See below. |
 
 Redirects are followed manually up to `max_redirects`, including relative
 `Location` values. Every redirect destination is checked against the target
@@ -239,6 +240,47 @@ policy before it is fetched.
 > [!IMPORTANT]
 > Client headers, including `Authorization`, are
 > preserved across redirects, so **configure target allowlists accordingly**.
+
+#### `proxy.response_headers_overrides`
+
+A list of rules that let the proxy owner pre-define response header changes
+for specific proxied traffic. Consumers need no special parameters: they
+request the target URL as usual, and matching responses carry the configured
+headers. This is useful for various purposes, including making proxied pages embeddable, for example when
+a consumer site enforces `Cross-Origin-Embedder-Policy: require-corp` and the
+proxied iframe response needs `Cross-Origin-Resource-Policy: cross-origin`.
+
+```yaml
+proxy:
+  response_headers_overrides:
+    - site: "*://app.example.com/xyz?p*"
+      remove_headers:
+        - x-frame-options
+      set_headers:
+        - Cross-Origin-Embedder-Policy: require-corp
+```
+
+| Field           | Type                | Description                                                        |
+|-----------------|---------------------|--------------------------------------------------------------------|
+| `site`          | string              | Full-URL pattern (exact, wildcard, or `/regex/flags`).             |
+| `remove_headers`| list[string] or null| Headers to remove, if present.                                     |
+| `add_headers`   | list[{name: value}] or null | Values appended without removing existing same-name values. |
+| `set_headers`   | list[{name: value}] or null | Values that replace all existing same-name values (or are added when absent). |
+
+Behaviour:
+
+- Every rule whose `site` matches is applied, in config order. Within a rule,
+  actions are evaluated in the order `remove_headers` → `add_headers` →
+  `set_headers`.
+- `site` is matched against both the originally requested target URL and the
+  final post-redirect URL, so rules can target either the consumer-facing URL
+  or the redirect destination (e.g. a CDN host).
+- Overrides are applied after cache lookup and are never stored in cache
+  entries, so the cache identity is unaffected and all consumers of the same
+  cached entry receive their configured headers.
+- Hop-by-hop headers, `Content-Length`, the generated CORS response headers,
+  and `X-Cache` cannot be overridden; rules touching them are rejected at
+  startup.
 
 ## Header forwarding
 

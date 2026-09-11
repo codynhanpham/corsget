@@ -38,6 +38,7 @@ fn cached_response(
     bucket: String,
     result_max: u64,
     cache_status: &'static str,
+    requested_url: &Url,
 ) -> Result<Response, AppError> {
     let status = StatusCode::from_u16(entry.status)
         .map_err(|error| AppError::Upstream(format!("invalid cached status: {error}")))?;
@@ -46,6 +47,12 @@ fn cached_response(
         headers.remove(header::CONTENT_LENGTH);
     }
     crate::cache::add_cache_header(&mut headers, cache_status);
+    // Overrides are applied after cache lookup so cached entries stay
+    // override-agnostic. A cache hit never follows redirects, so the final
+    // URL equals the requested target URL.
+    state
+        .header_overrides
+        .apply(&mut headers, requested_url, requested_url);
     let result_guard = ResultSizeGuard::new(result_max);
     if result_guard.would_exceed(entry.body_len) {
         return Err(AppError::TooLarge(format!(
@@ -300,6 +307,7 @@ pub async fn proxy_handler(
             bucket,
             state.config.connection.bandwidth_limit.result.max,
             "HIT",
+            &target_url,
         );
     }
 
@@ -325,6 +333,10 @@ pub async fn proxy_handler(
     let max_redirects = state.config.proxy.max_redirects;
     let mut redirects_left = max_redirects;
     let mut redirect_base = target_url.clone();
+    // The URL of the last hop; equals the requested target when no redirect
+    // was followed. Header override rules match against both this URL and
+    // the originally requested one.
+    let mut final_url = target_url.clone();
     let upstream_response = loop {
         let resp = upstream_req.send().await.map_err(AppError::from)?;
         if resp.status() == StatusCode::NOT_MODIFIED
@@ -344,6 +356,7 @@ pub async fn proxy_handler(
                 bucket,
                 state.config.connection.bandwidth_limit.result.max,
                 "REVALIDATED",
+                &target_url,
             );
         }
         // `StatusCode::is_redirection()` also includes statuses such as
@@ -369,6 +382,7 @@ pub async fn proxy_handler(
             .map_err(|e| AppError::BadUrl(e.to_string()))?;
         validate_target_policy(&state, &next_url, &origin)?;
         redirect_base = next_url.clone();
+        final_url = next_url.clone();
         let mut forwarded = forward_headers(req.headers(), &next_url);
         if let Some(entry) = cached_entry.as_ref() {
             crate::cache::Cache::add_validators(&mut forwarded, entry);
@@ -412,6 +426,12 @@ pub async fn proxy_handler(
             },
         );
     }
+    // Apply config-driven response header overrides after all other header
+    // processing, matching against both the requested target URL and the
+    // final post-redirect URL.
+    state
+        .header_overrides
+        .apply(&mut headers, &target_url, &final_url);
 
     // Begin an atomic cache write for eligible responses. Cache storage is
     // best-effort: a write failure must not interrupt the client response.

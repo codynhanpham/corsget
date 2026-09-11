@@ -21,6 +21,7 @@ mod config;
 mod cors;
 mod error;
 mod extractors;
+mod headers;
 mod limit;
 mod matcher;
 mod proxy;
@@ -173,6 +174,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Log the resolved configuration and cache state once at startup.
 fn log_startup_summary(config_path: &std::path::Path, state: &AppState) {
     tracing::info!(path = %config_path.display(), "using config file");
+    if state.header_overrides.is_empty() {
+        tracing::debug!("no response header overrides configured");
+    } else {
+        tracing::info!("response header overrides enabled");
+    }
     let status = &state.cache_status;
     if status.enabled {
         tracing::info!(

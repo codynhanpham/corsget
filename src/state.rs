@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::cache::{Cache, CacheStatus};
 use crate::config::Config;
 use crate::extractors::RateLimitKey;
+use crate::headers::HeaderOverridePolicy;
 use crate::limit::BandwidthLimiter;
 use crate::matcher::MatchPolicy;
 
@@ -29,6 +30,8 @@ pub struct AppState {
     pub cache: Option<Cache>,
     /// Cache initialization status for the startup summary.
     pub cache_status: CacheStatus,
+    /// Compiled config-driven response header overrides.
+    pub header_overrides: HeaderOverridePolicy,
 }
 
 impl AppState {
@@ -47,6 +50,11 @@ impl AppState {
         let cache_initialization = Cache::initialize(&config.cache, config_path);
         let cache = cache_initialization.cache;
         let cache_status = cache_initialization.status;
+
+        let header_overrides = HeaderOverridePolicy::new(&config.proxy.response_headers_overrides)
+            .map_err(|error| {
+                crate::error::AppError::Denied(format!("invalid header override: {error}"))
+            })?;
 
         let http_client = reqwest::Client::builder()
             // We handle redirects manually so the Authorization header
@@ -69,6 +77,7 @@ impl AppState {
             http_client,
             cache,
             cache_status,
+            header_overrides,
         })
     }
 }

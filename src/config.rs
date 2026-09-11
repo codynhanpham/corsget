@@ -4,6 +4,7 @@
 //! (unknown keys are rejected to catch typos). The structure mirrors
 //! [`config.example.yml`](../../config.example.yml).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use noyalib::from_reader_strict;
@@ -286,6 +287,64 @@ pub struct ProxyConfig {
     /// Upstream request timeout in seconds.
     #[serde(deserialize_with = "deserialize_timeout")]
     pub timeout: u64,
+    /// Config-driven response header overrides applied to proxied
+    /// responses. A null value or null list entries mean no overrides.
+    #[serde(default, deserialize_with = "deserialize_optional_vec")]
+    pub response_headers_overrides: Vec<ResponseHeaderOverrideConfig>,
+}
+
+/// A single response-header override rule.
+///
+/// Every rule whose `site` pattern matches the requested target URL (or its
+/// final post-redirect URL) is applied, in the order the rules appear in the
+/// config. Within a rule, actions are evaluated in the order
+/// `remove_headers` → `add_headers` → `set_headers`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseHeaderOverrideConfig {
+    /// Full-URL pattern (exact, wildcard, or `/regex/flags`) matched against
+    /// the requested target URL and the final post-redirect URL.
+    pub site: String,
+    /// Response headers to remove, if present.
+    #[serde(default, deserialize_with = "deserialize_non_empty_strings")]
+    pub remove_headers: Vec<String>,
+    /// Header values appended without removing existing same-name values.
+    #[serde(default, deserialize_with = "deserialize_optional_vec")]
+    pub add_headers: Vec<HeaderPair>,
+    /// Header values that replace all existing same-name values (or are
+    /// added when the header is absent).
+    #[serde(default, deserialize_with = "deserialize_optional_vec")]
+    pub set_headers: Vec<HeaderPair>,
+}
+
+/// A single `name: value` header pair from an override rule.
+#[derive(Debug, Clone)]
+pub struct HeaderPair {
+    /// Header name.
+    pub name: String,
+    /// Header value.
+    pub value: String,
+}
+
+impl<'de> Deserialize<'de> for HeaderPair {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let map: BTreeMap<String, String> = BTreeMap::deserialize(deserializer)?;
+        if map.len() != 1 {
+            return Err(serde::de::Error::custom(
+                "each `add_headers`/`set_headers` entry must contain exactly one `name: value` pair",
+            ));
+        }
+        let (name, value) = map.into_iter().next().expect("map has exactly one entry");
+        if name.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "header name in `add_headers`/`set_headers` must not be empty",
+            ));
+        }
+        Ok(HeaderPair { name, value })
+    }
 }
 
 /// Persistent response-cache configuration.
@@ -422,6 +481,21 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "fields `proxy.max_redirects` and `proxy.timeout` cannot both be 0; increase either value to enable redirects or upstream requests".to_string(),
             ));
+        }
+        for (index, rule) in self.proxy.response_headers_overrides.iter().enumerate() {
+            if rule.site.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "field `proxy.response_headers_overrides[{index}].site` must not be empty; use a target URL pattern such as `*://example.com/*`"
+                )));
+            }
+            if rule.remove_headers.is_empty()
+                && rule.add_headers.is_empty()
+                && rule.set_headers.is_empty()
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "field `proxy.response_headers_overrides[{index}]` must define at least one of `remove_headers`, `add_headers`, or `set_headers`"
+                )));
+            }
         }
         Ok(())
     }
@@ -561,6 +635,142 @@ proxy: { max_redirects: 10, timeout: 30 }
             error.contains("whole number from 0 to 65535"),
             "got {error}"
         );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn response_header_overrides_default_to_empty() {
+        let yaml = "
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection: { target: {}, origin: {} }
+proxy: { max_redirects: 10, timeout: 30 }
+";
+        let tmp = std::env::temp_dir().join("corsget_test_overrides_default.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let cfg = Config::load(&tmp).unwrap();
+        assert!(cfg.proxy.response_headers_overrides.is_empty());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn response_header_overrides_parse() {
+        let yaml = r#"
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection: { target: {}, origin: {} }
+proxy:
+  max_redirects: 10
+  timeout: 30
+  response_headers_overrides:
+    - site: "*://app.example.com/xyz?p*"
+      remove_headers:
+        - x-frame-options
+      add_headers:
+        - Cross-Origin-Resource-Policy: cross-origin
+      set_headers:
+        - Cross-Origin-Embedder-Policy: require-corp
+    - site: '/^https://api\d+\.example\.com/'
+      set_headers:
+        - x-custom: value
+"#;
+        let tmp = std::env::temp_dir().join("corsget_test_overrides_parse.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let cfg = Config::load(&tmp).unwrap();
+        let rules = &cfg.proxy.response_headers_overrides;
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].site, "*://app.example.com/xyz?p*");
+        assert_eq!(rules[0].remove_headers, vec!["x-frame-options"]);
+        assert_eq!(rules[0].add_headers.len(), 1);
+        assert_eq!(rules[0].add_headers[0].name, "Cross-Origin-Resource-Policy");
+        assert_eq!(rules[0].add_headers[0].value, "cross-origin");
+        assert_eq!(rules[0].set_headers[0].name, "Cross-Origin-Embedder-Policy");
+        assert_eq!(rules[1].set_headers[0].value, "value");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn response_header_overrides_reject_empty_site() {
+        let yaml = "
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection: { target: {}, origin: {} }
+proxy:
+  max_redirects: 10
+  timeout: 30
+  response_headers_overrides:
+    - site: \"\"
+      set_headers:
+        - x-a: b
+";
+        let tmp = std::env::temp_dir().join("corsget_test_overrides_empty_site.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let err = Config::load(&tmp).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "got {err:?}");
+        assert!(err.to_string().contains("site"), "got {err}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn response_header_overrides_reject_no_actions() {
+        let yaml = "
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection: { target: {}, origin: {} }
+proxy:
+  max_redirects: 10
+  timeout: 30
+  response_headers_overrides:
+    - site: \"*://example.com/*\"
+";
+        let tmp = std::env::temp_dir().join("corsget_test_overrides_no_actions.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let err = Config::load(&tmp).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("at least one of `remove_headers`"),
+            "got {err}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn response_header_overrides_reject_unknown_key() {
+        let yaml = "
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection: { target: {}, origin: {} }
+proxy:
+  max_redirects: 10
+  timeout: 30
+  response_headers_overrides:
+    - site: \"*://example.com/*\"
+      set_headers:
+        - x-a: b
+      bogus: true
+";
+        let tmp = std::env::temp_dir().join("corsget_test_overrides_unknown.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let err = Config::load(&tmp).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)), "got {err:?}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn response_header_overrides_reject_multi_key_pair() {
+        let yaml = "
+application: { host: [0.0.0.0], port: 9647, hostname: localhost }
+connection: { target: {}, origin: {} }
+proxy:
+  max_redirects: 10
+  timeout: 30
+  response_headers_overrides:
+    - site: \"*://example.com/*\"
+      set_headers:
+        - x-a: b
+          x-c: d
+";
+        let tmp = std::env::temp_dir().join("corsget_test_overrides_multi_key.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let err = Config::load(&tmp).unwrap_err();
+        // The nullable-list untagged deserializer reports this as a generic
+        // parse failure, but the rule is still rejected.
+        assert!(matches!(err, ConfigError::Parse(_)), "got {err:?}");
         let _ = std::fs::remove_file(&tmp);
     }
 }

@@ -183,6 +183,7 @@ mod tests {
             proxy: crate::config::ProxyConfig {
                 max_redirects: 0,
                 timeout: 30,
+                response_headers_overrides: Vec::new(),
             },
             cache: crate::config::CacheConfig::default(),
         };
