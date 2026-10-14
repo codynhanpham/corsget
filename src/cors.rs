@@ -122,10 +122,47 @@ pub fn cors_headers(headers: &HeaderMap) -> HeaderMap {
     map
 }
 
+/// Append `field` to the response's `Vary` header set unless it is already
+/// nominated (case-insensitively, across comma-separated lists and repeated
+/// `Vary` headers).
+///
+/// corsget echoes the request's `Origin` in `Access-Control-Allow-Origin`,
+/// so every such response is origin-dependent. Without `Vary: Origin`, any
+/// shared HTTP cache between corsget and the browser — including the
+/// browser's own HTTP cache, which is partitioned per *top-level site* and
+/// therefore shared between subdomains of the same site — can store a
+/// response generated for one origin and replay it to another, poisoning
+/// the `Access-Control-Allow-Origin` value.
+pub fn add_vary_field(headers: &mut HeaderMap, field: &str) {
+    let already_nominated = headers.get_all(header::VARY).iter().any(|value| {
+        value
+            .to_str()
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case(field))
+            })
+            .unwrap_or(false)
+    });
+    if already_nominated {
+        return;
+    }
+    // `field` is always a compile-time constant ASCII header name, so the
+    // parse cannot fail; fall back to ignoring rather than panicking.
+    if let Ok(value) = HeaderValue::from_str(field) {
+        headers.append(header::VARY, value);
+    }
+}
+
 /// Middleware that injects CORS headers into every response.
 pub async fn cors_layer(mut req: Request, next: Next) -> Response {
     // Capture the origin before the handler consumes the request.
     let cors = cors_headers(req.headers());
+    // The response is origin-dependent only when an `Origin` was echoed; a
+    // request without `Origin` gets `Access-Control-Allow-Origin: *`, which
+    // every origin may reuse.
+    let origin_echoed = req.headers().contains_key(header::ORIGIN);
     // Stash for handlers that may want to inspect it.
     req.extensions_mut().insert(cors.clone());
     let mut response = next.run(req).await;
@@ -133,6 +170,9 @@ pub async fn cors_layer(mut req: Request, next: Next) -> Response {
     // value that could make the browser select the wrong origin.
     for (name, value) in &cors {
         response.headers_mut().insert(name, value.clone());
+    }
+    if origin_echoed {
+        add_vary_field(response.headers_mut(), "origin");
     }
     response
 }
@@ -156,6 +196,10 @@ pub async fn preflight_handler(
     }
     validate_target_policy(&state, &target_url, &Origin::from_headers(req.headers()))?;
     let mut response = StatusCode::NO_CONTENT.into_response();
+    // The preflight response echoes `Access-Control-Request-Headers` and
+    // reflects the request `Origin`, so shared caches must key on both.
+    add_vary_field(response.headers_mut(), "origin");
+    add_vary_field(response.headers_mut(), "access-control-request-headers");
     response.headers_mut().extend(cors);
     Ok(response)
 }
@@ -164,4 +208,62 @@ pub async fn preflight_handler(
 fn _ensure_header_name_parse() {
     // Compile-time sanity that the header names we use are valid.
     let _: HeaderName = header::ACCESS_CONTROL_ALLOW_ORIGIN;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vary_fields(headers: &HeaderMap) -> Vec<String> {
+        headers
+            .get_all(header::VARY)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect()
+    }
+
+    #[test]
+    fn vary_field_is_added_when_absent() {
+        let mut headers = HeaderMap::new();
+        add_vary_field(&mut headers, "origin");
+        assert_eq!(vary_fields(&headers), vec!["origin"]);
+    }
+
+    #[test]
+    fn vary_field_is_not_duplicated_across_repeated_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::VARY, HeaderValue::from_static("Accept"));
+        headers.append(header::VARY, HeaderValue::from_static("Origin"));
+        add_vary_field(&mut headers, "origin");
+        assert_eq!(vary_fields(&headers), vec!["accept", "origin"]);
+    }
+
+    #[test]
+    fn vary_field_is_not_duplicated_within_a_single_header() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::VARY,
+            HeaderValue::from_static("Accept-Encoding, ORIGIN"),
+        );
+        add_vary_field(&mut headers, "origin");
+        assert_eq!(vary_fields(&headers), vec!["accept-encoding", "origin"]);
+        // No extra header was appended.
+        assert_eq!(headers.get_all(header::VARY).iter().count(), 1);
+    }
+
+    #[test]
+    fn distinct_vary_fields_are_appended_independently() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::VARY, HeaderValue::from_static("accept"));
+        add_vary_field(&mut headers, "origin");
+        add_vary_field(&mut headers, "access-control-request-headers");
+        assert_eq!(
+            vary_fields(&headers),
+            vec!["accept", "origin", "access-control-request-headers"]
+        );
+    }
 }
